@@ -169,7 +169,7 @@ bool FUEAgentEditorToolServer::Start(const FString& InHost, const int32 InPort)
 	Host = InHost;
 	Port = InPort;
 	const FIPv4Endpoint Endpoint(Address, Port);
-	Listener = MakeUnique<FTcpListener>(Endpoint, FTimespan::FromMilliseconds(100), TEXT("UEAgentEditorToolServer"));
+	Listener = MakeUnique<FTcpListener>(Endpoint, FTimespan::FromMilliseconds(100));
 	Listener->OnConnectionAccepted().BindRaw(this, &FUEAgentEditorToolServer::HandleConnectionAccepted);
 	if (!Listener->Init())
 	{
