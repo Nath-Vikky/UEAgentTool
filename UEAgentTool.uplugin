@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "UEAgentTool",
+	"Description": "Idea",
+	"Category": "Other",
+	"CreatedBy": "Vikky",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "UEAgentTool",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}
