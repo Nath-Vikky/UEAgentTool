@@ -2,6 +2,8 @@
 
 #include "SAgentRootPanel.h"
 
+#include "AgentEditorToolRegistry.h"
+
 #include "AgentStyle.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
@@ -70,16 +72,7 @@ namespace UEAgentRootPanelPrivate
 		bool bWrittenToDisk = false;
 	};
 
-	struct FEditorOperationExecutionResult
-	{
-		bool bSuccess = false;
-		FString ExecutionState = TEXT("failed");
-		FString TransactionId;
-		FString UndoHint;
-		TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
-		TArray<TSharedPtr<FJsonValue>> ErrorValues;
-		TSharedPtr<FJsonObject> MetadataObject = MakeShared<FJsonObject>();
-	};
+	using FEditorOperationExecutionResult = FUEAgentEditorToolExecutionResult;
 
 	static FString GetLocalizedUiText(const FString& LanguageCode, const TCHAR* ZhText, const TCHAR* EnText)
 	{
@@ -1201,45 +1194,93 @@ namespace UEAgentRootPanelPrivate
 		return ExecutionResult;
 	}
 
+	static void RegisterEditorOperationTool(
+		FUEAgentEditorToolRegistry& Registry,
+		const FName ToolName,
+		const FString& OperationType,
+		const FString& Description,
+		const FString& Category,
+		const TArray<FString>& RequiredFields,
+		const TArray<FString>& OptionalFields,
+		const FUEAgentEditorToolExecutor& Executor)
+	{
+		FUEAgentEditorToolDefinition Definition;
+		Definition.ToolName = ToolName;
+		Definition.OperationType = OperationType;
+		Definition.Description = Description;
+		Definition.Category = Category;
+		Definition.SideEffectLevel = TEXT("confirmed_write");
+		Definition.RequiredFields = RequiredFields;
+		Definition.OptionalFields = OptionalFields;
+		Definition.Executor = Executor;
+		Registry.RegisterTool(Definition);
+	}
+
+	static FUEAgentEditorToolRegistry BuildEditorOperationToolRegistry()
+	{
+		FUEAgentEditorToolRegistry Registry;
+		RegisterEditorOperationTool(
+			Registry,
+			FName(TEXT("rename_asset")),
+			TEXT("rename_selected_asset"),
+			TEXT("Rename one selected/content-browser asset after backend Proposal confirmation."),
+			TEXT("asset"),
+			{ TEXT("asset_path"), TEXT("new_name") },
+			{ TEXT("reason"), TEXT("source_task_id") },
+			FUEAgentEditorToolExecutor::CreateStatic(&ExecuteRenameSelectedAsset));
+		RegisterEditorOperationTool(
+			Registry,
+			FName(TEXT("set_static_mesh_settings")),
+			TEXT("apply_static_mesh_basic_settings"),
+			TEXT("Apply whitelisted Static Mesh settings after backend Proposal confirmation."),
+			TEXT("asset"),
+			{ TEXT("asset_path"), TEXT("settings") },
+			{ TEXT("before_snapshot"), TEXT("reason"), TEXT("source_task_id") },
+			FUEAgentEditorToolExecutor::CreateStatic(&ExecuteApplyStaticMeshBasicSettings));
+		RegisterEditorOperationTool(
+			Registry,
+			FName(TEXT("create_blueprint")),
+			TEXT("create_blueprint_asset"),
+			TEXT("Create one Blueprint asset under /Game after backend Proposal confirmation."),
+			TEXT("blueprint"),
+			{ TEXT("parent_class"), TEXT("target_folder"), TEXT("asset_name") },
+			{ TEXT("reason"), TEXT("source_task_id") },
+			FUEAgentEditorToolExecutor::CreateStatic(&ExecuteCreateBlueprintAsset));
+		RegisterEditorOperationTool(
+			Registry,
+			FName(TEXT("add_blueprint_variable")),
+			TEXT("add_blueprint_variable"),
+			TEXT("Add one member variable to a Blueprint after backend Proposal confirmation."),
+			TEXT("blueprint"),
+			{ TEXT("blueprint_path"), TEXT("variable_name"), TEXT("variable_type") },
+			{ TEXT("category"), TEXT("default_value"), TEXT("editable"), TEXT("expose_on_spawn") },
+			FUEAgentEditorToolExecutor::CreateStatic(&ExecuteAddBlueprintVariable));
+		RegisterEditorOperationTool(
+			Registry,
+			FName(TEXT("add_blueprint_component")),
+			TEXT("add_blueprint_component"),
+			TEXT("Add one component node to a Blueprint after backend Proposal confirmation."),
+			TEXT("blueprint"),
+			{ TEXT("blueprint_path"), TEXT("component_name"), TEXT("component_class") },
+			{ TEXT("attach_to"), TEXT("transform") },
+			FUEAgentEditorToolExecutor::CreateStatic(&ExecuteAddBlueprintComponent));
+		RegisterEditorOperationTool(
+			Registry,
+			FName(TEXT("add_blueprint_event")),
+			TEXT("create_blueprint_event_stub"),
+			TEXT("Create a small Blueprint event stub after backend Proposal confirmation."),
+			TEXT("blueprint"),
+			{ TEXT("blueprint_path"), TEXT("event_name") },
+			{ TEXT("graph_name"), TEXT("node_comment") },
+			FUEAgentEditorToolExecutor::CreateStatic(&ExecuteCreateBlueprintEventStub));
+		return Registry;
+	}
+
 	static FEditorOperationExecutionResult ExecuteEditorOperationProposal(const FUEAgentProposalSummary& Proposal)
 	{
 		TSharedPtr<FJsonObject> PayloadObject = ParseJsonObject(Proposal.OperationPayloadJson);
-		FEditorOperationExecutionResult ExecutionResult;
-		if (!PayloadObject.IsValid())
-		{
-			ExecutionResult.ExecutionState = TEXT("blocked");
-			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("invalid_operation_payload"), TEXT("Proposal does not contain dry_run_preview.operation_payload."));
-			return ExecutionResult;
-		}
-
-		if (Proposal.OperationType.Equals(TEXT("rename_selected_asset"), ESearchCase::IgnoreCase))
-		{
-			return ExecuteRenameSelectedAsset(PayloadObject, Proposal.ProposalId);
-		}
-		if (Proposal.OperationType.Equals(TEXT("apply_static_mesh_basic_settings"), ESearchCase::IgnoreCase))
-		{
-			return ExecuteApplyStaticMeshBasicSettings(PayloadObject, Proposal.ProposalId);
-		}
-		if (Proposal.OperationType.Equals(TEXT("create_blueprint_asset"), ESearchCase::IgnoreCase))
-		{
-			return ExecuteCreateBlueprintAsset(PayloadObject, Proposal.ProposalId);
-		}
-		if (Proposal.OperationType.Equals(TEXT("add_blueprint_variable"), ESearchCase::IgnoreCase))
-		{
-			return ExecuteAddBlueprintVariable(PayloadObject, Proposal.ProposalId);
-		}
-		if (Proposal.OperationType.Equals(TEXT("add_blueprint_component"), ESearchCase::IgnoreCase))
-		{
-			return ExecuteAddBlueprintComponent(PayloadObject, Proposal.ProposalId);
-		}
-		if (Proposal.OperationType.Equals(TEXT("create_blueprint_event_stub"), ESearchCase::IgnoreCase))
-		{
-			return ExecuteCreateBlueprintEventStub(PayloadObject, Proposal.ProposalId);
-		}
-
-		ExecutionResult.ExecutionState = TEXT("blocked");
-		AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("unsupported_editor_operation"), Proposal.OperationType);
-		return ExecutionResult;
+		const FUEAgentEditorToolRegistry Registry = BuildEditorOperationToolRegistry();
+		return Registry.ExecuteTool(Proposal.OperationType, PayloadObject, Proposal.ProposalId);
 	}
 
 	static void AppendGeneratedDraftItem(const TSharedPtr<FJsonObject>& ItemObject, TArray<FGeneratedDraftItem>& OutDraftItems)

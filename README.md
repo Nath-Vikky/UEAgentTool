@@ -1,4 +1,4 @@
-﻿# UEAgentTool
+# UEAgentTool
 
 UEAgentTool is an Unreal Engine editor plugin that connects a local UE workflow to UEAgentBackend. It provides editor-side panels for Agent Chat / Project QA, Code Review, Code Generate, Logs Analyze, and Assets Inspect, plus confirmed editor-operation proposals for safe asset and Blueprint actions.
 
@@ -21,3 +21,9 @@ See [Docs/user-guide.md](Docs/user-guide.md) for editor usage notes.
 ## Development
 
 Build from Rider or Unreal Build Tool inside the owning UE project. Generated folders such as `Binaries/` and `Intermediate/` are intentionally excluded from Git.
+
+## Architecture Notes
+
+- Editor write operations are routed through an internal `FUEAgentEditorToolRegistry`.
+- The registry describes tool name, operation type, category, side-effect level, required fields, and executor binding.
+- This keeps the existing HTTP Proposal flow stable while preparing the plugin for a future MCP/TCP tool transport.
