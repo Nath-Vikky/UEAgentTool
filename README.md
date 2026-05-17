@@ -25,5 +25,6 @@ Build from Rider or Unreal Build Tool inside the owning UE project. Generated fo
 ## Architecture Notes
 
 - Editor write operations are routed through an internal `FUEAgentEditorToolRegistry`.
-- The registry describes tool name, operation type, category, side-effect level, required fields, and executor binding.
-- This keeps the existing HTTP Proposal flow stable while preparing the plugin for a future MCP/TCP tool transport.
+- `FUEAgentEditorToolCatalog` centralizes tool metadata such as operation type, category, side-effect level, and required/optional fields.
+- `SAgentRootPanel` only binds the current UE Editor executors to catalog definitions, so the existing HTTP Proposal flow stays stable.
+- The catalog can build a metadata-only tools list for a future MCP/TCP `tools/list` transport without duplicating UI execution code.

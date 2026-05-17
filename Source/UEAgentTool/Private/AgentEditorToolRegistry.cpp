@@ -26,7 +26,7 @@ namespace UEAgentEditorToolRegistryPrivate
 void FUEAgentEditorToolRegistry::RegisterTool(const FUEAgentEditorToolDefinition& Definition)
 {
 	const FString OperationKey = NormalizeOperationType(Definition.OperationType);
-	if (OperationKey.IsEmpty() || !Definition.Executor.IsBound())
+	if (OperationKey.IsEmpty())
 	{
 		return;
 	}
@@ -107,6 +107,7 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolRegistry::ToJsonObject() const
 		ToolObject->SetStringField(TEXT("category"), Definition.Category);
 		ToolObject->SetStringField(TEXT("side_effect_level"), Definition.SideEffectLevel);
 		ToolObject->SetBoolField(TEXT("enabled"), Definition.bEnabled);
+		ToolObject->SetBoolField(TEXT("has_executor"), Definition.Executor.IsBound());
 		ToolObject->SetArrayField(TEXT("required_fields"), UEAgentEditorToolRegistryPrivate::StringsToJsonArray(Definition.RequiredFields));
 		ToolObject->SetArrayField(TEXT("optional_fields"), UEAgentEditorToolRegistryPrivate::StringsToJsonArray(Definition.OptionalFields));
 		ToolValues.Add(MakeShared<FJsonValueObject>(ToolObject));
