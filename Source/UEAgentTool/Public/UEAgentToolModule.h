@@ -3,6 +3,7 @@
 #pragma once
 
 #include "AgentContextCollector.h"
+#include "AgentEditorToolServer.h"
 #include "AgentHttpClient.h"
 #include "AgentStateStore.h"
 #include "CoreMinimal.h"
@@ -32,4 +33,5 @@ private:
 	TSharedPtr<FUEAgentStateStore> StateStore;
 	TSharedPtr<FUEAgentHttpClient> HttpClient;
 	TSharedPtr<FUEAgentContextCollector> ContextCollector;
+	TSharedPtr<FUEAgentEditorToolServer> EditorToolServer;
 };

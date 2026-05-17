@@ -34,9 +34,11 @@ public class UEAgentTool : ModuleRules
 				"Json",
 				"JsonUtilities",
 				"LevelEditor",
+				"Networking",
 				"Projects",
 				"Slate",
 				"SlateCore",
+				"Sockets",
 				"ToolMenus",
 				"UnrealEd"
 			}

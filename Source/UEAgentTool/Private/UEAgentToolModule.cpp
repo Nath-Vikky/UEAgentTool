@@ -27,6 +27,8 @@ void FUEAgentToolModule::StartupModule()
 	StateStore = MakeShared<FUEAgentStateStore>();
 	HttpClient = MakeShared<FUEAgentHttpClient>(StateStore.ToSharedRef());
 	ContextCollector = MakeShared<FUEAgentContextCollector>();
+	EditorToolServer = MakeShared<FUEAgentEditorToolServer>();
+	EditorToolServer->StartFromConfig();
 
 	FGlobalTabmanager::Get()->RegisterNomadTabSpawner(
 		MainTabId,
@@ -48,6 +50,11 @@ void FUEAgentToolModule::ShutdownModule()
 	FUEAgentToolCommands::Unregister();
 	FUEAgentToolStyle::Shutdown();
 
+	if (EditorToolServer.IsValid())
+	{
+		EditorToolServer->Stop();
+	}
+	EditorToolServer.Reset();
 	ContextCollector.Reset();
 	HttpClient.Reset();
 	StateStore.Reset();
