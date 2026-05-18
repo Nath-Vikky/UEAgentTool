@@ -44,6 +44,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("renames") },
 		{ TEXT("reason"), TEXT("source_task_id") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("move_assets")),
+		TEXT("move_assets"),
+		TEXT("Move multiple assets to one folder after backend Proposal confirmation."),
+		TEXT("asset"),
+		{ TEXT("asset_paths"), TEXT("target_folder") },
+		{ TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("set_static_mesh_settings")),
 		TEXT("apply_static_mesh_basic_settings"),
 		TEXT("Apply whitelisted Static Mesh settings after backend Proposal confirmation."),
@@ -101,6 +108,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("widget_blueprint_path") },
 		{},
 		TEXT("read_only")));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("add_umg_widget")),
+		TEXT("add_umg_widget"),
+		TEXT("Add one simple Widget to a Widget Blueprint after backend Proposal confirmation."),
+		TEXT("umg"),
+		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("widget_class") },
+		{ TEXT("parent_widget_name"), TEXT("text"), TEXT("is_variable") }));
 	return Definitions;
 }
 

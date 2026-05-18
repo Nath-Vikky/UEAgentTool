@@ -8,8 +8,18 @@
 #include "AgentStyle.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
+#include "Blueprint/WidgetTree.h"
 #include "Components/ActorComponent.h"
+#include "Components/Border.h"
+#include "Components/Button.h"
+#include "Components/CanvasPanel.h"
+#include "Components/HorizontalBox.h"
+#include "Components/Image.h"
 #include "Components/SceneComponent.h"
+#include "Components/PanelSlot.h"
+#include "Components/PanelWidget.h"
+#include "Components/TextBlock.h"
+#include "Components/VerticalBox.h"
 #include "Containers/Set.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -39,7 +49,9 @@
 #include "Serialization/JsonSerializer.h"
 #include "ScopedTransaction.h"
 #include "Styling/AppStyle.h"
+#include "Templates/SubclassOf.h"
 #include "UObject/Class.h"
+#include "WidgetBlueprint.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SComboBox.h"
@@ -377,6 +389,45 @@ namespace UEAgentRootPanelPrivate
 	static UBlueprint* LoadBlueprintAsset(const FString& BlueprintPath)
 	{
 		return Cast<UBlueprint>(LoadEditorAsset(BlueprintPath));
+	}
+
+	static UWidgetBlueprint* LoadWidgetBlueprintAsset(const FString& WidgetBlueprintPath)
+	{
+		return Cast<UWidgetBlueprint>(LoadEditorAsset(WidgetBlueprintPath));
+	}
+
+	static UClass* ResolveUmgWidgetClass(const FString& WidgetClassPath)
+	{
+		const FString Normalized = WidgetClassPath.TrimStartAndEnd().Replace(TEXT("_"), TEXT("")).ToLower();
+		if (Normalized == TEXT("text") || Normalized == TEXT("textblock") || WidgetClassPath == TEXT("/Script/UMG.TextBlock"))
+		{
+			return UTextBlock::StaticClass();
+		}
+		if (Normalized == TEXT("button") || WidgetClassPath == TEXT("/Script/UMG.Button"))
+		{
+			return UButton::StaticClass();
+		}
+		if (Normalized == TEXT("image") || WidgetClassPath == TEXT("/Script/UMG.Image"))
+		{
+			return UImage::StaticClass();
+		}
+		if (Normalized == TEXT("border") || WidgetClassPath == TEXT("/Script/UMG.Border"))
+		{
+			return UBorder::StaticClass();
+		}
+		if (Normalized == TEXT("canvas") || Normalized == TEXT("canvaspanel") || WidgetClassPath == TEXT("/Script/UMG.CanvasPanel"))
+		{
+			return UCanvasPanel::StaticClass();
+		}
+		if (Normalized == TEXT("horizontalbox") || WidgetClassPath == TEXT("/Script/UMG.HorizontalBox"))
+		{
+			return UHorizontalBox::StaticClass();
+		}
+		if (Normalized == TEXT("verticalbox") || WidgetClassPath == TEXT("/Script/UMG.VerticalBox"))
+		{
+			return UVerticalBox::StaticClass();
+		}
+		return nullptr;
 	}
 
 	static FString BlueprintStatusToOperationString(const EBlueprintStatus Status)
@@ -793,6 +844,125 @@ namespace UEAgentRootPanelPrivate
 		return ExecutionResult;
 	}
 
+
+	static FEditorOperationExecutionResult ExecuteMoveAssets(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("AssetTools.RenameAssets(move)"));
+
+		FString TargetFolderPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("target_folder")));
+		TargetFolderPath.RemoveFromEnd(TEXT("/"));
+		if (!(TargetFolderPath == TEXT("/Game") || TargetFolderPath.StartsWith(TEXT("/Game/"))))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("target_folder_must_be_under_game"), TargetFolderPath);
+			return ExecutionResult;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* AssetPathValues = nullptr;
+		if (!PayloadObject.IsValid() || !PayloadObject->TryGetArrayField(TEXT("asset_paths"), AssetPathValues) || AssetPathValues == nullptr || AssetPathValues->Num() == 0)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("asset_paths must be a non-empty array."));
+			return ExecutionResult;
+		}
+		if (AssetPathValues->Num() > 20)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("too_many_assets"), TEXT("Move assets is limited to 20 assets."));
+			return ExecutionResult;
+		}
+
+		TArray<UObject*> Assets;
+		TArray<FString> SourcePaths;
+		TArray<FString> AssetNames;
+		TArray<FString> TargetPaths;
+		TSet<FString> SeenTargets;
+
+		for (int32 Index = 0; Index < AssetPathValues->Num(); ++Index)
+		{
+			const FString AssetPath = NormalizeAssetPackagePath((*AssetPathValues)[Index].IsValid() ? (*AssetPathValues)[Index]->AsString() : FString());
+			if (AssetPath.IsEmpty())
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("empty_asset_path"), FString::Printf(TEXT("asset_paths[%d] is empty."), Index));
+				return ExecutionResult;
+			}
+			const FString CurrentFolder = FPaths::GetPath(AssetPath);
+			if (CurrentFolder == TargetFolderPath)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("target_folder_matches_current"), AssetPath);
+				return ExecutionResult;
+			}
+			UObject* Asset = LoadEditorAsset(AssetPath);
+			if (Asset == nullptr)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("asset_not_found"), FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
+				return ExecutionResult;
+			}
+
+			const FString AssetName = FPaths::GetCleanFilename(AssetPath);
+			const FString TargetPath = FString::Printf(TEXT("%s/%s"), *TargetFolderPath, *AssetName);
+			if (SeenTargets.Contains(TargetPath))
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("duplicate_target_path"), TargetPath);
+				return ExecutionResult;
+			}
+			SeenTargets.Add(TargetPath);
+			if (LoadEditorAsset(TargetPath) != nullptr)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("target_asset_exists"), FString::Printf(TEXT("Target asset already exists: %s"), *TargetPath));
+				return ExecutionResult;
+			}
+
+			Assets.Add(Asset);
+			SourcePaths.Add(AssetPath);
+			AssetNames.Add(AssetName);
+			TargetPaths.Add(TargetPath);
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Move Assets")));
+		TArray<FAssetRenameData> RenameData;
+		for (int32 Index = 0; Index < Assets.Num(); ++Index)
+		{
+			Assets[Index]->Modify();
+			RenameData.Add(FAssetRenameData(Assets[Index], TargetFolderPath, AssetNames[Index]));
+		}
+
+		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+		const bool bMoved = AssetToolsModule.Get().RenameAssets(RenameData);
+		if (!bMoved)
+		{
+			ExecutionResult.ExecutionState = TEXT("failed");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("move_assets_failed"), TEXT("AssetTools RenameAssets returned false."));
+			return ExecutionResult;
+		}
+
+		TArray<TSharedPtr<FJsonValue>> MovedValues;
+		for (int32 Index = 0; Index < TargetPaths.Num(); ++Index)
+		{
+			TSharedPtr<FJsonObject> MoveResult = MakeShared<FJsonObject>();
+			MoveResult->SetStringField(TEXT("asset_path"), SourcePaths[Index]);
+			MoveResult->SetStringField(TEXT("target_path"), TargetPaths[Index]);
+			MovedValues.Add(MakeShared<FJsonValueObject>(MoveResult));
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), TargetPaths[Index]);
+		}
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo or move assets back. Redirectors are not fixed automatically.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("target_folder"), TargetFolderPath);
+		ExecutionResult.ResultObject->SetNumberField(TEXT("item_count"), TargetPaths.Num());
+		ExecutionResult.ResultObject->SetArrayField(TEXT("moved_assets"), MovedValues);
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		return ExecutionResult;
+	}
 
 	static FEditorOperationExecutionResult ExecuteApplyStaticMeshBasicSettings(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
@@ -1369,6 +1539,157 @@ namespace UEAgentRootPanelPrivate
 		return ExecutionResult;
 	}
 
+	static FEditorOperationExecutionResult ExecuteAddUmgWidget(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("UWidgetTree.ConstructWidget"));
+
+		const FString WidgetBlueprintPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("widget_blueprint_path")));
+		const FString WidgetName = GetScalarFieldAsString(PayloadObject, TEXT("widget_name")).TrimStartAndEnd();
+		const FString WidgetClassPath = GetScalarFieldAsString(PayloadObject, TEXT("widget_class")).TrimStartAndEnd();
+		const FString ParentWidgetName = GetScalarFieldAsString(PayloadObject, TEXT("parent_widget_name")).TrimStartAndEnd();
+		const FString TextValue = GetScalarFieldAsString(PayloadObject, TEXT("text"));
+		if (WidgetBlueprintPath.IsEmpty() || WidgetName.IsEmpty() || WidgetClassPath.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("widget_blueprint_path, widget_name and widget_class are required."));
+			return ExecutionResult;
+		}
+
+		FText InvalidNameReason;
+		const FName WidgetFName(*WidgetName);
+		if (!WidgetFName.IsValidXName(INVALID_NAME_CHARACTERS, &InvalidNameReason))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("invalid_widget_name"), InvalidNameReason.ToString());
+			return ExecutionResult;
+		}
+
+		UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprintAsset(WidgetBlueprintPath);
+		if (WidgetBlueprint == nullptr || WidgetBlueprint->WidgetTree == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_blueprint_not_found"), FString::Printf(TEXT("Widget Blueprint not found: %s"), *WidgetBlueprintPath));
+			return ExecutionResult;
+		}
+
+		bool bWidgetAlreadyExists = false;
+		WidgetBlueprint->WidgetTree->ForEachWidget([&bWidgetAlreadyExists, WidgetFName](UWidget* ExistingWidget)
+		{
+			if (ExistingWidget != nullptr && ExistingWidget->GetFName() == WidgetFName)
+			{
+				bWidgetAlreadyExists = true;
+			}
+		});
+		if (bWidgetAlreadyExists)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_already_exists"), WidgetName);
+			return ExecutionResult;
+		}
+
+		UClass* WidgetClass = ResolveUmgWidgetClass(WidgetClassPath);
+		if (WidgetClass == nullptr || !WidgetClass->IsChildOf(UWidget::StaticClass()))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_class_unsupported"), WidgetClassPath);
+			return ExecutionResult;
+		}
+
+		UWidget* ParentWidget = nullptr;
+		if (!ParentWidgetName.IsEmpty())
+		{
+			WidgetBlueprint->WidgetTree->ForEachWidget([&ParentWidget, ParentWidgetName](UWidget* ExistingWidget)
+			{
+				if (ExistingWidget != nullptr && ExistingWidget->GetName().Equals(ParentWidgetName, ESearchCase::IgnoreCase))
+				{
+					ParentWidget = ExistingWidget;
+				}
+			});
+			if (ParentWidget == nullptr)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("parent_widget_not_found"), ParentWidgetName);
+				return ExecutionResult;
+			}
+		}
+		else
+		{
+			ParentWidget = WidgetBlueprint->WidgetTree->RootWidget;
+		}
+
+		UPanelWidget* ParentPanel = Cast<UPanelWidget>(ParentWidget);
+		if (WidgetBlueprint->WidgetTree->RootWidget != nullptr && ParentPanel == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("parent_widget_is_not_panel"), ParentWidgetName.IsEmpty() ? TEXT("RootWidget") : ParentWidgetName);
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Add UMG Widget")));
+		WidgetBlueprint->Modify();
+		WidgetBlueprint->WidgetTree->Modify();
+
+		TSubclassOf<UWidget> WidgetSubclass(WidgetClass);
+		UWidget* NewWidget = WidgetBlueprint->WidgetTree->ConstructWidget<UWidget>(WidgetSubclass, WidgetFName);
+		if (NewWidget == nullptr)
+		{
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_creation_failed"), WidgetName);
+			return ExecutionResult;
+		}
+		NewWidget->SetFlags(RF_Transactional);
+		NewWidget->Modify();
+
+		bool bIsVariable = true;
+		TryGetBoolField(PayloadObject, TEXT("is_variable"), bIsVariable);
+		NewWidget->bIsVariable = bIsVariable;
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("is_variable"), bIsVariable ? TEXT("true") : TEXT("false"));
+
+		if (!TextValue.IsEmpty())
+		{
+			if (UTextBlock* TextBlock = Cast<UTextBlock>(NewWidget))
+			{
+				TextBlock->SetText(FText::FromString(TextValue));
+				SetAppliedField(ExecutionResult.ResultObject, TEXT("text"), TextValue);
+			}
+			else
+			{
+				AddFailedField(ExecutionResult.ResultObject, TEXT("text"), TEXT("text is only applied to TextBlock widgets in v1"));
+			}
+		}
+
+		if (WidgetBlueprint->WidgetTree->RootWidget == nullptr)
+		{
+			WidgetBlueprint->WidgetTree->RootWidget = NewWidget;
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("root_widget"), WidgetName);
+		}
+		else
+		{
+			ParentPanel->Modify();
+			UPanelSlot* NewSlot = ParentPanel->AddChild(NewWidget);
+			if (NewSlot != nullptr)
+			{
+				NewSlot->SetFlags(RF_Transactional);
+				NewSlot->Modify();
+			}
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("parent_widget_name"), ParentPanel->GetName());
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to remove the added widget. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_blueprint_path"), WidgetBlueprintPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_name"), WidgetName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_class"), WidgetClass->GetPathName());
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_widgets"), WidgetName);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
+		return ExecutionResult;
+	}
 	static bool BindEditorOperationExecutor(FUEAgentEditorToolDefinition& Definition)
 	{
 		if (Definition.OperationType.Equals(TEXT("rename_selected_asset"), ESearchCase::IgnoreCase))
@@ -1379,6 +1700,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("batch_rename_assets"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteBatchRenameAssets);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("move_assets"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteMoveAssets);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("apply_static_mesh_basic_settings"), ESearchCase::IgnoreCase))
@@ -1409,6 +1735,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("compile_blueprint"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteCompileBlueprint);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("add_umg_widget"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteAddUmgWidget);
 			return true;
 		}
 		return false;
