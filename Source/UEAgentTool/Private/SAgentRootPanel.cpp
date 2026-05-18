@@ -32,6 +32,7 @@
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/Texture.h"
 #include "Engine/World.h"
 #include "Framework/Application/SlateApplication.h"
 #include "GameFramework/Actor.h"
@@ -2080,6 +2081,57 @@ namespace UEAgentRootPanelPrivate
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), MaterialInstance->GetOutermost() != nullptr ? MaterialInstance->GetOutermost()->GetName() : FString());
 		return ExecutionResult;
 	}
+	static FEditorOperationExecutionResult ExecuteSetMaterialInstanceTextureParameter(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("UMaterialInstanceConstant.SetTextureParameterValueEditorOnly"));
+
+		const FString MaterialInstancePath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("material_instance_path")));
+		const FString ParameterName = GetScalarFieldAsString(PayloadObject, TEXT("parameter_name")).TrimStartAndEnd();
+		const FString TexturePath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("texture_path")));
+		if (MaterialInstancePath.IsEmpty() || ParameterName.IsEmpty() || TexturePath.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("material_instance_path, parameter_name and texture_path are required."));
+			return ExecutionResult;
+		}
+
+		UMaterialInstanceConstant* MaterialInstance = Cast<UMaterialInstanceConstant>(LoadEditorAsset(MaterialInstancePath));
+		if (MaterialInstance == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("material_instance_not_found"), FString::Printf(TEXT("Material Instance Constant not found: %s"), *MaterialInstancePath));
+			return ExecutionResult;
+		}
+
+		UTexture* Texture = Cast<UTexture>(LoadEditorAsset(TexturePath));
+		if (Texture == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("texture_not_found"), FString::Printf(TEXT("Texture asset not found: %s"), *TexturePath));
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Set Material Instance Texture Parameter")));
+		MaterialInstance->Modify();
+		const FMaterialParameterInfo ParameterInfo{FName(*ParameterName)};
+		MaterialInstance->SetTextureParameterValueEditorOnly(ParameterInfo, Texture);
+		MaterialInstance->PostEditChange();
+		MaterialInstance->MarkPackageDirty();
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo or source control to revert the Material Instance texture parameter change. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("material_instance_path"), MaterialInstancePath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("parameter_name"), ParameterName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("texture_path"), TexturePath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("texture_path"), TexturePath);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), MaterialInstance->GetOutermost() != nullptr ? MaterialInstance->GetOutermost()->GetName() : FString());
+		return ExecutionResult;
+	}
 
 	static bool BindEditorOperationExecutor(FUEAgentEditorToolDefinition& Definition)
 	{
@@ -2146,6 +2198,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("set_material_instance_parameter"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetMaterialInstanceParameter);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("set_material_instance_texture_parameter"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetMaterialInstanceTextureParameter);
 			return true;
 		}
 		return false;
