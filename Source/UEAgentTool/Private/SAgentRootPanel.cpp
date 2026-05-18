@@ -1830,6 +1830,183 @@ namespace UEAgentRootPanelPrivate
 		return ExecutionResult;
 	}
 
+	static AActor* FindActorByReference(UWorld* EditorWorld, const FString& ActorReference)
+	{
+		const FString Reference = ActorReference.TrimStartAndEnd();
+		if (EditorWorld == nullptr || Reference.IsEmpty())
+		{
+			return nullptr;
+		}
+
+		for (ULevel* Level : EditorWorld->GetLevels())
+		{
+			if (Level == nullptr)
+			{
+				continue;
+			}
+			for (AActor* Actor : Level->Actors)
+			{
+				if (Actor == nullptr || Actor->IsPendingKillPending())
+				{
+					continue;
+				}
+
+				const FString ActorLabel = Actor->GetActorLabel();
+				const FString ActorName = Actor->GetName();
+				const FString ActorPath = Actor->GetPathName();
+				if (Reference.Equals(ActorLabel, ESearchCase::IgnoreCase)
+					|| Reference.Equals(ActorName, ESearchCase::IgnoreCase)
+					|| Reference.Equals(ActorPath, ESearchCase::IgnoreCase))
+				{
+					return Actor;
+				}
+			}
+		}
+		return nullptr;
+	}
+
+	static FEditorOperationExecutionResult ExecuteSetActorTransform(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("AActor.SetActorTransform"));
+
+		const FString ActorReference = GetScalarFieldAsString(PayloadObject, TEXT("actor_reference")).TrimStartAndEnd();
+		const FString TransformMode = GetScalarFieldAsString(PayloadObject, TEXT("transform_mode")).TrimStartAndEnd().ToLower();
+		if (ActorReference.IsEmpty() || TransformMode.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("actor_reference and transform_mode are required."));
+			return ExecutionResult;
+		}
+		if (TransformMode != TEXT("absolute") && TransformMode != TEXT("delta"))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("transform_mode_unsupported"), TEXT("Only absolute and delta transform modes are supported."));
+			return ExecutionResult;
+		}
+		if (GEditor == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("editor_unavailable"), TEXT("GEditor is unavailable."));
+			return ExecutionResult;
+		}
+
+		UWorld* EditorWorld = GEditor->GetEditorWorldContext().World();
+		AActor* TargetActor = FindActorByReference(EditorWorld, ActorReference);
+		if (TargetActor == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("actor_not_found"), ActorReference);
+			return ExecutionResult;
+		}
+
+		const TCHAR* TransformFieldName = TransformMode == TEXT("delta") ? TEXT("transform_delta") : TEXT("transform");
+		const TSharedPtr<FJsonObject> TransformObject = GetObjectField(PayloadObject, TransformFieldName);
+		if (!TransformObject.IsValid() || TransformObject->Values.Num() == 0)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("transform_payload_required"), TEXT("transform or transform_delta must contain location, rotation, or scale."));
+			return ExecutionResult;
+		}
+
+		FVector LocationValue;
+		FRotator RotationValue;
+		FVector ScaleValue;
+		const bool bHasLocation = TryReadVectorField(TransformObject, TEXT("location"), LocationValue);
+		const bool bHasRotation = TryReadRotatorField(TransformObject, TEXT("rotation"), RotationValue);
+		const bool bHasScale = TryReadVectorField(TransformObject, TEXT("scale"), ScaleValue);
+		if (!bHasLocation && !bHasRotation && !bHasScale)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("transform_fields_missing"), TEXT("No supported transform fields were provided."));
+			return ExecutionResult;
+		}
+
+		FVector NewLocation = TargetActor->GetActorLocation();
+		FRotator NewRotation = TargetActor->GetActorRotation();
+		FVector NewScale = TargetActor->GetActorScale3D();
+		if (TransformMode == TEXT("delta"))
+		{
+			if (bHasLocation)
+			{
+				NewLocation += LocationValue;
+			}
+			if (bHasRotation)
+			{
+				NewRotation.Pitch += RotationValue.Pitch;
+				NewRotation.Yaw += RotationValue.Yaw;
+				NewRotation.Roll += RotationValue.Roll;
+			}
+			if (bHasScale)
+			{
+				NewScale = FVector(NewScale.X * ScaleValue.X, NewScale.Y * ScaleValue.Y, NewScale.Z * ScaleValue.Z);
+			}
+		}
+		else
+		{
+			if (bHasLocation)
+			{
+				NewLocation = LocationValue;
+			}
+			if (bHasRotation)
+			{
+				NewRotation = RotationValue;
+			}
+			if (bHasScale)
+			{
+				NewScale = ScaleValue;
+			}
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Set Actor Transform")));
+		TargetActor->SetFlags(RF_Transactional);
+		TargetActor->Modify();
+		if (ULevel* ActorLevel = TargetActor->GetLevel())
+		{
+			ActorLevel->Modify();
+		}
+
+		TargetActor->SetActorLocation(NewLocation);
+		TargetActor->SetActorRotation(NewRotation);
+		TargetActor->SetActorScale3D(NewScale);
+		TargetActor->PostEditMove(true);
+		if (ULevel* ActorLevel = TargetActor->GetLevel())
+		{
+			ActorLevel->MarkPackageDirty();
+		}
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to revert the Actor transform. The level is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("actor_reference"), ActorReference);
+		ExecutionResult.ResultObject->SetStringField(TEXT("actor_label"), TargetActor->GetActorLabel());
+		ExecutionResult.ResultObject->SetStringField(TEXT("actor_name"), TargetActor->GetName());
+		ExecutionResult.ResultObject->SetStringField(TEXT("transform_mode"), TransformMode);
+		ExecutionResult.ResultObject->SetStringField(TEXT("location"), NewLocation.ToString());
+		ExecutionResult.ResultObject->SetStringField(TEXT("rotation"), NewRotation.ToString());
+		ExecutionResult.ResultObject->SetStringField(TEXT("scale"), NewScale.ToString());
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		if (bHasLocation)
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("transform.location"), NewLocation.ToString());
+		}
+		if (bHasRotation)
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("transform.rotation"), NewRotation.ToString());
+		}
+		if (bHasScale)
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("transform.scale"), NewScale.ToString());
+		}
+		if (ULevel* ActorLevel = TargetActor->GetLevel())
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("level_name"), ActorLevel->GetOutermost() != nullptr ? ActorLevel->GetOutermost()->GetName() : ActorLevel->GetName());
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), ActorLevel->GetOutermost() != nullptr ? ActorLevel->GetOutermost()->GetName() : FString());
+		}
+		return ExecutionResult;
+	}
 	static FEditorOperationExecutionResult ExecuteSetMaterialInstanceParameter(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -1959,6 +2136,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("place_actor_in_level"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecutePlaceActorInLevel);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("set_actor_transform"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetActorTransform);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("set_material_instance_parameter"), ESearchCase::IgnoreCase))
