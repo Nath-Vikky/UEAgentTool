@@ -130,6 +130,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("layout") },
 		{ TEXT("reason"), TEXT("source_task_id") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("set_umg_widget_visibility")),
+		TEXT("set_umg_widget_visibility"),
+		TEXT("Set visibility on one UMG widget after backend Proposal confirmation."),
+		TEXT("umg"),
+		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("visibility") },
+		{ TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("place_actor_in_level")),
 		TEXT("place_actor_in_level"),
 		TEXT("Place one Actor in the current editor level after backend Proposal confirmation."),

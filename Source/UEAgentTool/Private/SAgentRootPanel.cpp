@@ -367,6 +367,36 @@ namespace UEAgentRootPanelPrivate
 		return true;
 	}
 
+	static bool TryParseSlateVisibility(const FString& RawValue, ESlateVisibility& OutVisibility)
+	{
+		const FString Value = RawValue.TrimStartAndEnd().Replace(TEXT("-"), TEXT("_")).ToLower();
+		if (Value == TEXT("visible") || Value == TEXT("show") || Value == TEXT("shown"))
+		{
+			OutVisibility = ESlateVisibility::Visible;
+			return true;
+		}
+		if (Value == TEXT("collapsed") || Value == TEXT("collapse") || Value == TEXT("hide"))
+		{
+			OutVisibility = ESlateVisibility::Collapsed;
+			return true;
+		}
+		if (Value == TEXT("hidden") || Value == TEXT("invisible"))
+		{
+			OutVisibility = ESlateVisibility::Hidden;
+			return true;
+		}
+		if (Value == TEXT("hit_test_invisible") || Value == TEXT("hittestinvisible"))
+		{
+			OutVisibility = ESlateVisibility::HitTestInvisible;
+			return true;
+		}
+		if (Value == TEXT("self_hit_test_invisible") || Value == TEXT("selfhittestinvisible"))
+		{
+			OutVisibility = ESlateVisibility::SelfHitTestInvisible;
+			return true;
+		}
+		return false;
+	}
 	static bool TryReadVector2Object(const TSharedPtr<FJsonObject>& JsonObject, FVector2D& OutVector)
 	{
 		if (!JsonObject.IsValid())
@@ -1983,6 +2013,73 @@ namespace UEAgentRootPanelPrivate
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
 		return ExecutionResult;
 	}
+	static FEditorOperationExecutionResult ExecuteSetUmgWidgetVisibility(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("UWidget.SetVisibility"));
+
+		const FString WidgetBlueprintPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("widget_blueprint_path")));
+		const FString WidgetName = GetScalarFieldAsString(PayloadObject, TEXT("widget_name")).TrimStartAndEnd();
+		const FString VisibilityValue = GetScalarFieldAsString(PayloadObject, TEXT("visibility")).TrimStartAndEnd();
+		if (WidgetBlueprintPath.IsEmpty() || WidgetName.IsEmpty() || VisibilityValue.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("widget_blueprint_path, widget_name and visibility are required."));
+			return ExecutionResult;
+		}
+
+		ESlateVisibility NewVisibility = ESlateVisibility::Visible;
+		if (!TryParseSlateVisibility(VisibilityValue, NewVisibility))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("visibility_unsupported"), VisibilityValue);
+			return ExecutionResult;
+		}
+
+		UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprintAsset(WidgetBlueprintPath);
+		if (WidgetBlueprint == nullptr || WidgetBlueprint->WidgetTree == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_blueprint_not_found"), FString::Printf(TEXT("Widget Blueprint not found: %s"), *WidgetBlueprintPath));
+			return ExecutionResult;
+		}
+
+		UWidget* TargetWidget = nullptr;
+		WidgetBlueprint->WidgetTree->ForEachWidget([&TargetWidget, WidgetName](UWidget* ExistingWidget)
+		{
+			if (ExistingWidget != nullptr && ExistingWidget->GetName().Equals(WidgetName, ESearchCase::IgnoreCase))
+			{
+				TargetWidget = ExistingWidget;
+			}
+		});
+		if (TargetWidget == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_not_found"), WidgetName);
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Set UMG Widget Visibility")));
+		WidgetBlueprint->Modify();
+		WidgetBlueprint->WidgetTree->Modify();
+		TargetWidget->Modify();
+		TargetWidget->SetVisibility(NewVisibility);
+		TargetWidget->PostEditChange();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to revert the widget visibility. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_blueprint_path"), WidgetBlueprintPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_name"), WidgetName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("visibility"), VisibilityValue);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("visibility"), VisibilityValue);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
+		return ExecutionResult;
+	}
 	static FEditorOperationExecutionResult ExecutePlaceActorInLevel(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -2432,6 +2529,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("set_umg_widget_layout"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetUmgWidgetLayout);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("set_umg_widget_visibility"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetUmgWidgetVisibility);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("place_actor_in_level"), ESearchCase::IgnoreCase))
