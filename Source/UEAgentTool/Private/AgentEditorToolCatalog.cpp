@@ -123,6 +123,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("text") },
 		{ TEXT("reason"), TEXT("source_task_id") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("set_umg_widget_layout")),
+		TEXT("set_umg_widget_layout"),
+		TEXT("Set CanvasPanelSlot layout fields on one UMG widget after backend Proposal confirmation."),
+		TEXT("umg"),
+		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("layout") },
+		{ TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("place_actor_in_level")),
 		TEXT("place_actor_in_level"),
 		TEXT("Place one Actor in the current editor level after backend Proposal confirmation."),

@@ -13,6 +13,7 @@
 #include "Components/Border.h"
 #include "Components/Button.h"
 #include "Components/CanvasPanel.h"
+#include "Components/CanvasPanelSlot.h"
 #include "Components/HorizontalBox.h"
 #include "Components/Image.h"
 #include "Components/SceneComponent.h"
@@ -366,6 +367,76 @@ namespace UEAgentRootPanelPrivate
 		return true;
 	}
 
+	static bool TryReadVector2Object(const TSharedPtr<FJsonObject>& JsonObject, FVector2D& OutVector)
+	{
+		if (!JsonObject.IsValid())
+		{
+			return false;
+		}
+
+		double X = 0.0;
+		double Y = 0.0;
+		if (!TryGetNumberComponent(JsonObject, TEXT("x"), X) && !TryGetNumberComponent(JsonObject, TEXT("X"), X))
+		{
+			return false;
+		}
+		if (!TryGetNumberComponent(JsonObject, TEXT("y"), Y) && !TryGetNumberComponent(JsonObject, TEXT("Y"), Y))
+		{
+			return false;
+		}
+
+		OutVector = FVector2D(X, Y);
+		return true;
+	}
+
+	static bool TryReadVector2Field(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, FVector2D& OutVector)
+	{
+		const TSharedPtr<FJsonObject> VectorObject = GetObjectField(JsonObject, FieldName);
+		if (TryReadVector2Object(VectorObject, OutVector))
+		{
+			return true;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* ArrayValues = nullptr;
+		if (JsonObject.IsValid() && JsonObject->TryGetArrayField(FieldName, ArrayValues) && ArrayValues != nullptr && ArrayValues->Num() >= 2)
+		{
+			OutVector = FVector2D((*ArrayValues)[0]->AsNumber(), (*ArrayValues)[1]->AsNumber());
+			return true;
+		}
+
+		return false;
+	}
+
+	static bool TryReadAnchorsObject(const TSharedPtr<FJsonObject>& JsonObject, FAnchors& OutAnchors)
+	{
+		if (!JsonObject.IsValid())
+		{
+			return false;
+		}
+
+		FVector2D Minimum;
+		FVector2D Maximum;
+		if (TryReadVector2Field(JsonObject, TEXT("minimum"), Minimum) && TryReadVector2Field(JsonObject, TEXT("maximum"), Maximum))
+		{
+			OutAnchors = FAnchors(Minimum.X, Minimum.Y, Maximum.X, Maximum.Y);
+			return true;
+		}
+
+		double MinX = 0.0;
+		double MinY = 0.0;
+		double MaxX = 0.0;
+		double MaxY = 0.0;
+		if ((TryGetNumberComponent(JsonObject, TEXT("min_x"), MinX) || TryGetNumberComponent(JsonObject, TEXT("MinX"), MinX))
+			&& (TryGetNumberComponent(JsonObject, TEXT("min_y"), MinY) || TryGetNumberComponent(JsonObject, TEXT("MinY"), MinY))
+			&& (TryGetNumberComponent(JsonObject, TEXT("max_x"), MaxX) || TryGetNumberComponent(JsonObject, TEXT("MaxX"), MaxX))
+			&& (TryGetNumberComponent(JsonObject, TEXT("max_y"), MaxY) || TryGetNumberComponent(JsonObject, TEXT("MaxY"), MaxY)))
+		{
+			OutAnchors = FAnchors(MinX, MinY, MaxX, MaxY);
+			return true;
+		}
+
+		return false;
+	}
 	static bool TryReadVectorField(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, FVector& OutVector)
 	{
 		const TSharedPtr<FJsonObject> VectorObject = GetObjectField(JsonObject, FieldName);
@@ -1811,6 +1882,107 @@ namespace UEAgentRootPanelPrivate
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
 		return ExecutionResult;
 	}
+	static FEditorOperationExecutionResult ExecuteSetUmgWidgetLayout(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("UCanvasPanelSlot.SetLayoutFields"));
+
+		const FString WidgetBlueprintPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("widget_blueprint_path")));
+		const FString WidgetName = GetScalarFieldAsString(PayloadObject, TEXT("widget_name")).TrimStartAndEnd();
+		const TSharedPtr<FJsonObject> LayoutObject = GetObjectField(PayloadObject, TEXT("layout"));
+		if (WidgetBlueprintPath.IsEmpty() || WidgetName.IsEmpty() || !LayoutObject.IsValid())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("widget_blueprint_path, widget_name and layout are required."));
+			return ExecutionResult;
+		}
+
+		UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprintAsset(WidgetBlueprintPath);
+		if (WidgetBlueprint == nullptr || WidgetBlueprint->WidgetTree == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_blueprint_not_found"), FString::Printf(TEXT("Widget Blueprint not found: %s"), *WidgetBlueprintPath));
+			return ExecutionResult;
+		}
+
+		UWidget* TargetWidget = nullptr;
+		WidgetBlueprint->WidgetTree->ForEachWidget([&TargetWidget, WidgetName](UWidget* ExistingWidget)
+		{
+			if (ExistingWidget != nullptr && ExistingWidget->GetName().Equals(WidgetName, ESearchCase::IgnoreCase))
+			{
+				TargetWidget = ExistingWidget;
+			}
+		});
+		if (TargetWidget == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_not_found"), WidgetName);
+			return ExecutionResult;
+		}
+
+		UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(TargetWidget->Slot);
+		if (CanvasSlot == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_slot_is_not_canvas_panel_slot"), WidgetName);
+			return ExecutionResult;
+		}
+
+		FVector2D Position;
+		FVector2D Size;
+		FVector2D Alignment;
+		FAnchors Anchors;
+		const bool bHasPosition = TryReadVector2Field(LayoutObject, TEXT("position"), Position);
+		const bool bHasSize = TryReadVector2Field(LayoutObject, TEXT("size"), Size);
+		const bool bHasAlignment = TryReadVector2Field(LayoutObject, TEXT("alignment"), Alignment);
+		const bool bHasAnchors = TryReadAnchorsObject(GetObjectField(LayoutObject, TEXT("anchors")), Anchors);
+		if (!bHasPosition && !bHasSize && !bHasAlignment && !bHasAnchors)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("layout_has_no_supported_fields"), TEXT("layout must contain position, size, alignment or anchors."));
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Set UMG Widget Layout")));
+		WidgetBlueprint->Modify();
+		WidgetBlueprint->WidgetTree->Modify();
+		TargetWidget->Modify();
+		CanvasSlot->Modify();
+		if (bHasPosition)
+		{
+			CanvasSlot->SetPosition(Position);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("layout.position"), Position.ToString());
+		}
+		if (bHasSize)
+		{
+			CanvasSlot->SetSize(Size);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("layout.size"), Size.ToString());
+		}
+		if (bHasAlignment)
+		{
+			CanvasSlot->SetAlignment(Alignment);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("layout.alignment"), Alignment.ToString());
+		}
+		if (bHasAnchors)
+		{
+			CanvasSlot->SetAnchors(Anchors);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("layout.anchors"), FString::Printf(TEXT("%s,%s"), *Anchors.Minimum.ToString(), *Anchors.Maximum.ToString()));
+		}
+		CanvasSlot->PostEditChange();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to revert the CanvasPanelSlot layout. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_blueprint_path"), WidgetBlueprintPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_name"), WidgetName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("slot_type"), TEXT("CanvasPanelSlot"));
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
+		return ExecutionResult;
+	}
 	static FEditorOperationExecutionResult ExecutePlaceActorInLevel(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -2255,6 +2427,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("set_umg_widget_text"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetUmgWidgetText);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("set_umg_widget_layout"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetUmgWidgetLayout);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("place_actor_in_level"), ESearchCase::IgnoreCase))
