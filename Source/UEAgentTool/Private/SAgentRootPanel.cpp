@@ -528,7 +528,22 @@ namespace UEAgentRootPanelPrivate
 		{
 			return APawn::StaticClass();
 		}
-		return LoadObject<UClass>(nullptr, *ClassPath);
+
+		UClass* LoadedClass = LoadObject<UClass>(nullptr, *ClassPath);
+		if (LoadedClass != nullptr)
+		{
+			return LoadedClass;
+		}
+		if (ClassPath.StartsWith(TEXT("/Game/")))
+		{
+			const FString ObjectPath = ToObjectPath(NormalizeAssetPackagePath(ClassPath));
+			if (UBlueprint* BlueprintAsset = Cast<UBlueprint>(StaticLoadObject(UBlueprint::StaticClass(), nullptr, *ObjectPath)))
+			{
+				return BlueprintAsset->GeneratedClass;
+			}
+			return LoadObject<UClass>(nullptr, *(ObjectPath + TEXT("_C")));
+		}
+		return nullptr;
 	}
 
 	static UObject* LoadTypeObject(const FString& TypePath)
