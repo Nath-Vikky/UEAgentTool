@@ -37,6 +37,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("asset_path"), TEXT("new_name") },
 		{ TEXT("reason"), TEXT("source_task_id") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("batch_rename_assets")),
+		TEXT("batch_rename_assets"),
+		TEXT("Rename multiple assets in one confirmed backend Proposal."),
+		TEXT("asset"),
+		{ TEXT("renames") },
+		{ TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("set_static_mesh_settings")),
 		TEXT("apply_static_mesh_basic_settings"),
 		TEXT("Apply whitelisted Static Mesh settings after backend Proposal confirmation."),
@@ -84,6 +91,14 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		TEXT("Read Blueprint graph metadata through the optional TCP tool server."),
 		TEXT("blueprint"),
 		{ TEXT("blueprint_path") },
+		{},
+		TEXT("read_only")));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("get_widget_tree")),
+		TEXT("get_widget_tree"),
+		TEXT("Read UMG Widget Blueprint tree metadata through the optional TCP tool server."),
+		TEXT("umg"),
+		{ TEXT("widget_blueprint_path") },
 		{},
 		TEXT("read_only")));
 	return Definitions;

@@ -10,6 +10,7 @@
 #include "AssetToolsModule.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
+#include "Containers/Set.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
@@ -685,6 +686,114 @@ namespace UEAgentRootPanelPrivate
 		return ExecutionResult;
 	}
 
+	static FEditorOperationExecutionResult ExecuteBatchRenameAssets(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("AssetTools.RenameAssets(batch)"));
+
+		const TArray<TSharedPtr<FJsonValue>>* RenameValues = nullptr;
+		if (!PayloadObject.IsValid() || !PayloadObject->TryGetArrayField(TEXT("renames"), RenameValues) || RenameValues == nullptr || RenameValues->Num() == 0)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("renames must be a non-empty array."));
+			return ExecutionResult;
+		}
+		if (RenameValues->Num() > 20)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("too_many_renames"), TEXT("Batch rename is limited to 20 assets."));
+			return ExecutionResult;
+		}
+
+		TArray<UObject*> Assets;
+		TArray<FString> SourcePaths;
+		TArray<FString> FolderPaths;
+		TArray<FString> NewNames;
+		TArray<FString> TargetPaths;
+		TSet<FString> SeenTargets;
+
+		for (int32 Index = 0; Index < RenameValues->Num(); ++Index)
+		{
+			const TSharedPtr<FJsonObject> RenameObject = (*RenameValues)[Index].IsValid() ? (*RenameValues)[Index]->AsObject() : nullptr;
+			const FString AssetPath = NormalizeAssetPackagePath(GetScalarFieldAsString(RenameObject, TEXT("asset_path")));
+			const FString NewName = GetScalarFieldAsString(RenameObject, TEXT("new_name")).TrimStartAndEnd();
+			if (AssetPath.IsEmpty() || NewName.IsEmpty())
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_rename_item_payload"), FString::Printf(TEXT("renames[%d] requires asset_path and new_name."), Index));
+				return ExecutionResult;
+			}
+			UObject* Asset = LoadEditorAsset(AssetPath);
+			if (Asset == nullptr)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("asset_not_found"), FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
+				return ExecutionResult;
+			}
+
+			const FString FolderPath = FPaths::GetPath(AssetPath);
+			const FString TargetPath = FString::Printf(TEXT("%s/%s"), *FolderPath, *NewName);
+			if (SeenTargets.Contains(TargetPath))
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("duplicate_target_path"), TargetPath);
+				return ExecutionResult;
+			}
+			SeenTargets.Add(TargetPath);
+			if (LoadEditorAsset(TargetPath) != nullptr)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("target_asset_exists"), FString::Printf(TEXT("Target asset already exists: %s"), *TargetPath));
+				return ExecutionResult;
+			}
+
+			Assets.Add(Asset);
+			SourcePaths.Add(AssetPath);
+			FolderPaths.Add(FolderPath);
+			NewNames.Add(NewName);
+			TargetPaths.Add(TargetPath);
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Batch Rename Assets")));
+		TArray<FAssetRenameData> RenameData;
+		for (int32 Index = 0; Index < Assets.Num(); ++Index)
+		{
+			Assets[Index]->Modify();
+			RenameData.Add(FAssetRenameData(Assets[Index], FolderPaths[Index], NewNames[Index]));
+		}
+
+		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+		const bool bRenamed = AssetToolsModule.Get().RenameAssets(RenameData);
+		if (!bRenamed)
+		{
+			ExecutionResult.ExecutionState = TEXT("failed");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("batch_rename_failed"), TEXT("AssetTools RenameAssets returned false."));
+			return ExecutionResult;
+		}
+
+		TArray<TSharedPtr<FJsonValue>> RenamedValues;
+		for (int32 Index = 0; Index < TargetPaths.Num(); ++Index)
+		{
+			TSharedPtr<FJsonObject> RenameResult = MakeShared<FJsonObject>();
+			RenameResult->SetStringField(TEXT("asset_path"), SourcePaths[Index]);
+			RenameResult->SetStringField(TEXT("new_name"), NewNames[Index]);
+			RenameResult->SetStringField(TEXT("target_path"), TargetPaths[Index]);
+			RenamedValues.Add(MakeShared<FJsonValueObject>(RenameResult));
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), TargetPaths[Index]);
+		}
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo or rename assets back. Redirectors are not fixed automatically.");
+		ExecutionResult.ResultObject->SetNumberField(TEXT("item_count"), TargetPaths.Num());
+		ExecutionResult.ResultObject->SetArrayField(TEXT("renamed_assets"), RenamedValues);
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		return ExecutionResult;
+	}
+
+
 	static FEditorOperationExecutionResult ExecuteApplyStaticMeshBasicSettings(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -1265,6 +1374,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("rename_selected_asset"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteRenameSelectedAsset);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("batch_rename_assets"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteBatchRenameAssets);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("apply_static_mesh_basic_settings"), ESearchCase::IgnoreCase))

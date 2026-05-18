@@ -4,11 +4,14 @@
 
 #include "AgentEditorToolCatalog.h"
 #include "Async/Async.h"
+#include "Blueprint/WidgetTree.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "Engine/Blueprint.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
+#include "Components/PanelSlot.h"
+#include "Components/Widget.h"
 #include "Common/TcpListener.h"
 #include "Containers/StringConv.h"
 #include "Dom/JsonObject.h"
@@ -26,6 +29,7 @@
 #include "SocketSubsystem.h"
 #include "Sockets.h"
 #include "UObject/UObjectGlobals.h"
+#include "WidgetBlueprint.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUEAgentEditorToolServer, Log, All);
 
@@ -313,6 +317,70 @@ namespace UEAgentEditorToolServerPrivate
 		SnapshotObject->SetArrayField(TEXT("components"), ComponentValues);
 		return SnapshotObject;
 	}
+
+	static UWidgetBlueprint* LoadWidgetBlueprintAsset(const FString& WidgetBlueprintPath)
+	{
+		const FString PackagePath = NormalizeAssetPackagePath(WidgetBlueprintPath);
+		return Cast<UWidgetBlueprint>(StaticLoadObject(UWidgetBlueprint::StaticClass(), nullptr, *ToObjectPath(PackagePath)));
+	}
+
+	static TSharedPtr<FJsonObject> BuildWidgetTreeSnapshot(const FString& WidgetBlueprintPath)
+	{
+		const FString NormalizedPath = NormalizeAssetPackagePath(WidgetBlueprintPath);
+		if (NormalizedPath.IsEmpty())
+		{
+			return MakeToolErrorObject(TEXT("missing_widget_blueprint_path"), TEXT("widget_blueprint_path is required."));
+		}
+		UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprintAsset(NormalizedPath);
+		if (WidgetBlueprint == nullptr)
+		{
+			return MakeToolErrorObject(TEXT("widget_blueprint_not_found"), FString::Printf(TEXT("Widget Blueprint not found: %s"), *NormalizedPath));
+		}
+
+		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
+		SnapshotObject->SetStringField(TEXT("widget_blueprint_path"), NormalizedPath);
+		SnapshotObject->SetStringField(TEXT("widget_blueprint_name"), WidgetBlueprint->GetName());
+		SnapshotObject->SetStringField(TEXT("status"), BlueprintStatusToString(WidgetBlueprint->Status));
+		SnapshotObject->SetBoolField(TEXT("is_dirty"), WidgetBlueprint->GetPackage() != nullptr && WidgetBlueprint->GetPackage()->IsDirty());
+		if (WidgetBlueprint->ParentClass != nullptr)
+		{
+			SnapshotObject->SetStringField(TEXT("parent_class"), WidgetBlueprint->ParentClass->GetPathName());
+		}
+		if (WidgetBlueprint->WidgetTree == nullptr)
+		{
+			SnapshotObject->SetStringField(TEXT("root_widget"), TEXT(""));
+			SnapshotObject->SetNumberField(TEXT("widget_count"), 0);
+			SnapshotObject->SetArrayField(TEXT("widgets"), TArray<TSharedPtr<FJsonValue>>());
+			return SnapshotObject;
+		}
+
+		if (WidgetBlueprint->WidgetTree->RootWidget != nullptr)
+		{
+			SnapshotObject->SetStringField(TEXT("root_widget"), WidgetBlueprint->WidgetTree->RootWidget->GetName());
+			SnapshotObject->SetStringField(TEXT("root_widget_class"), WidgetBlueprint->WidgetTree->RootWidget->GetClass()->GetPathName());
+		}
+
+		TArray<TSharedPtr<FJsonValue>> WidgetValues;
+		WidgetBlueprint->WidgetTree->ForEachWidget([&WidgetValues](UWidget* Widget)
+		{
+			if (Widget == nullptr || WidgetValues.Num() >= 128)
+			{
+				return;
+			}
+			TSharedPtr<FJsonObject> WidgetObject = MakeShared<FJsonObject>();
+			WidgetObject->SetStringField(TEXT("widget_name"), Widget->GetName());
+			WidgetObject->SetStringField(TEXT("widget_class"), Widget->GetClass() != nullptr ? Widget->GetClass()->GetPathName() : TEXT("unknown"));
+			WidgetObject->SetBoolField(TEXT("is_variable"), Widget->bIsVariable);
+			if (Widget->Slot != nullptr)
+			{
+				WidgetObject->SetStringField(TEXT("slot_class"), Widget->Slot->GetClass()->GetPathName());
+			}
+			WidgetValues.Add(MakeShared<FJsonValueObject>(WidgetObject));
+		});
+		SnapshotObject->SetNumberField(TEXT("widget_count"), WidgetValues.Num());
+		SnapshotObject->SetArrayField(TEXT("widgets"), WidgetValues);
+		return SnapshotObject;
+	}
 }
 
 FUEAgentEditorToolServer::FUEAgentEditorToolServer() = default;
@@ -591,6 +659,21 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 		}
 		return BuildBlueprintGraphResult(BlueprintPath);
 	}
+	if (ToolName.Equals(TEXT("get_widget_tree"), ESearchCase::IgnoreCase))
+	{
+		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
+		const TSharedPtr<FJsonObject> ArgumentsObject = ParamsObject.IsValid() && ParamsObject->TryGetObjectField(TEXT("arguments"), ArgumentsField) && ArgumentsField != nullptr ? *ArgumentsField : nullptr;
+		FString WidgetBlueprintPath;
+		if (ArgumentsObject.IsValid())
+		{
+			ArgumentsObject->TryGetStringField(TEXT("widget_blueprint_path"), WidgetBlueprintPath);
+			if (WidgetBlueprintPath.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("blueprint_path"), WidgetBlueprintPath);
+			}
+		}
+		return BuildWidgetTreeResult(WidgetBlueprintPath);
+	}
 
 	ResultObject->SetBoolField(TEXT("isError"), true);
 	TextContent->SetStringField(TEXT("text"), FString::Printf(TEXT("Tool '%s' requires the existing HTTP Proposal confirmation flow and cannot be executed through raw MCP/TCP."), *ToolName));
@@ -619,6 +702,45 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildBlueprintGraphResult(cons
 		if (!bCompleted)
 		{
 			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading Blueprint graph metadata on the game thread."));
+		}
+	}
+
+	TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ContentValues;
+	TSharedPtr<FJsonObject> TextContent = MakeShared<FJsonObject>();
+	TextContent->SetStringField(TEXT("type"), TEXT("text"));
+	TextContent->SetStringField(TEXT("text"), SerializeJsonObject(SnapshotObject));
+	ContentValues.Add(MakeShared<FJsonValueObject>(TextContent));
+	ResultObject->SetArrayField(TEXT("content"), ContentValues);
+	const TSharedPtr<FJsonObject> StructuredObject = SnapshotObject.IsValid() ? SnapshotObject : MakeShared<FJsonObject>();
+	ResultObject->SetObjectField(TEXT("structuredContent"), StructuredObject);
+	if (SnapshotObject.IsValid() && SnapshotObject->HasField(TEXT("reason")))
+	{
+		ResultObject->SetBoolField(TEXT("isError"), true);
+	}
+	return ResultObject;
+}
+
+TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildWidgetTreeResult(const FString& WidgetBlueprintPath) const
+{
+	TSharedPtr<FJsonObject> SnapshotObject;
+	if (IsInGameThread())
+	{
+		SnapshotObject = UEAgentEditorToolServerPrivate::BuildWidgetTreeSnapshot(WidgetBlueprintPath);
+	}
+	else
+	{
+		FEvent* CompletionEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [WidgetBlueprintPath, &SnapshotObject, CompletionEvent]()
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::BuildWidgetTreeSnapshot(WidgetBlueprintPath);
+			CompletionEvent->Trigger();
+		});
+		const bool bCompleted = CompletionEvent->Wait(FTimespan::FromSeconds(3));
+		FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		if (!bCompleted)
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading Widget Tree metadata on the game thread."));
 		}
 	}
 

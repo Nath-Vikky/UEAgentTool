@@ -40,6 +40,8 @@ public class UEAgentTool : ModuleRules
 				"SlateCore",
 				"Sockets",
 				"ToolMenus",
+				"UMG",
+				"UMGEditor",
 				"UnrealEd"
 			}
 		);
