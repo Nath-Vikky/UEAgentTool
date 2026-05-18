@@ -3,18 +3,29 @@
 #include "AgentEditorToolServer.h"
 
 #include "AgentEditorToolCatalog.h"
+#include "Async/Async.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "Engine/Blueprint.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
 #include "Common/TcpListener.h"
 #include "Containers/StringConv.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "HAL/Event.h"
 #include "HAL/PlatformMisc.h"
+#include "HAL/PlatformProcess.h"
 #include "Interfaces/IPv4/IPv4Endpoint.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/PackageName.h"
 #include "Misc/ScopeLock.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "SocketSubsystem.h"
 #include "Sockets.h"
+#include "UObject/UObjectGlobals.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUEAgentEditorToolServer, Log, All);
 
@@ -96,6 +107,211 @@ namespace UEAgentEditorToolServerPrivate
 	{
 		return Value.Equals(TEXT("1")) || Value.Equals(TEXT("true"), ESearchCase::IgnoreCase)
 			|| Value.Equals(TEXT("yes"), ESearchCase::IgnoreCase) || Value.Equals(TEXT("on"), ESearchCase::IgnoreCase);
+	}
+
+	static FString BlueprintStatusToString(const EBlueprintStatus Status)
+	{
+		switch (Status)
+		{
+		case BS_Unknown:
+			return TEXT("unknown");
+		case BS_Dirty:
+			return TEXT("dirty");
+		case BS_Error:
+			return TEXT("error");
+		case BS_UpToDate:
+			return TEXT("up_to_date");
+		case BS_BeingCreated:
+			return TEXT("being_created");
+		case BS_UpToDateWithWarnings:
+			return TEXT("up_to_date_with_warnings");
+		default:
+			return TEXT("unknown");
+		}
+	}
+
+	static FString NormalizeAssetPackagePath(FString AssetPath)
+	{
+		AssetPath = AssetPath.TrimStartAndEnd().Replace(TEXT("\\"), TEXT("/"));
+		if (AssetPath.EndsWith(TEXT(".uasset"), ESearchCase::IgnoreCase))
+		{
+			AssetPath.LeftChopInline(7);
+		}
+		if (AssetPath.Contains(TEXT(".")) && AssetPath.StartsWith(TEXT("/")))
+		{
+			FString PackagePath;
+			FString ObjectName;
+			if (AssetPath.Split(TEXT("."), &PackagePath, &ObjectName, ESearchCase::CaseSensitive, ESearchDir::FromEnd)
+				&& !ObjectName.IsEmpty()
+				&& PackagePath.EndsWith(FString::Printf(TEXT("/%s"), *ObjectName)))
+			{
+				AssetPath = PackagePath;
+			}
+		}
+		if (!AssetPath.StartsWith(TEXT("/")))
+		{
+			AssetPath.RemoveFromStart(TEXT("/"));
+			AssetPath.RemoveFromEnd(TEXT("/"));
+			AssetPath = FString::Printf(TEXT("/Game/%s"), *AssetPath);
+		}
+		while (AssetPath.Contains(TEXT("//")))
+		{
+			AssetPath = AssetPath.Replace(TEXT("//"), TEXT("/"));
+		}
+		return AssetPath;
+	}
+
+	static FString GetAssetNameFromPackagePath(const FString& PackagePath)
+	{
+		int32 SlashIndex = INDEX_NONE;
+		return PackagePath.FindLastChar(TEXT('/'), SlashIndex) ? PackagePath.Mid(SlashIndex + 1) : PackagePath;
+	}
+
+	static FString ToObjectPath(const FString& PackagePath)
+	{
+		if (PackagePath.Contains(TEXT(".")))
+		{
+			return PackagePath;
+		}
+		const FString AssetName = GetAssetNameFromPackagePath(PackagePath);
+		return FString::Printf(TEXT("%s.%s"), *PackagePath, *AssetName);
+	}
+
+	static UBlueprint* LoadBlueprintAsset(const FString& BlueprintPath)
+	{
+		const FString PackagePath = NormalizeAssetPackagePath(BlueprintPath);
+		return Cast<UBlueprint>(StaticLoadObject(UBlueprint::StaticClass(), nullptr, *ToObjectPath(PackagePath)));
+	}
+
+	static TSharedPtr<FJsonObject> MakeToolErrorObject(const FString& Reason, const FString& Message)
+	{
+		TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+		ResultObject->SetBoolField(TEXT("isError"), true);
+		TArray<TSharedPtr<FJsonValue>> ContentValues;
+		TSharedPtr<FJsonObject> TextContent = MakeShared<FJsonObject>();
+		TextContent->SetStringField(TEXT("type"), TEXT("text"));
+		TextContent->SetStringField(TEXT("text"), Message);
+		ContentValues.Add(MakeShared<FJsonValueObject>(TextContent));
+		ResultObject->SetArrayField(TEXT("content"), ContentValues);
+		TSharedPtr<FJsonObject> StructuredObject = MakeShared<FJsonObject>();
+		StructuredObject->SetStringField(TEXT("reason"), Reason);
+		StructuredObject->SetStringField(TEXT("message"), Message);
+		ResultObject->SetObjectField(TEXT("structuredContent"), StructuredObject);
+		return ResultObject;
+	}
+
+	static void AddGraphSummaries(const TArray<UEdGraph*>& Graphs, const FString& GraphType, TArray<TSharedPtr<FJsonValue>>& OutGraphValues)
+	{
+		for (const UEdGraph* Graph : Graphs)
+		{
+			if (Graph == nullptr)
+			{
+				continue;
+			}
+			TSharedPtr<FJsonObject> GraphObject = MakeShared<FJsonObject>();
+			GraphObject->SetStringField(TEXT("graph_name"), Graph->GetName());
+			GraphObject->SetStringField(TEXT("graph_type"), GraphType);
+			GraphObject->SetNumberField(TEXT("node_count"), Graph->Nodes.Num());
+
+			TArray<TSharedPtr<FJsonValue>> NodeValues;
+			for (const UEdGraphNode* Node : Graph->Nodes)
+			{
+				if (Node == nullptr)
+				{
+					continue;
+				}
+				TSharedPtr<FJsonObject> NodeObject = MakeShared<FJsonObject>();
+				NodeObject->SetStringField(TEXT("node_name"), Node->GetName());
+				NodeObject->SetStringField(TEXT("node_class"), Node->GetClass() != nullptr ? Node->GetClass()->GetName() : TEXT("unknown"));
+				NodeObject->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+				NodeObject->SetNumberField(TEXT("x"), Node->NodePosX);
+				NodeObject->SetNumberField(TEXT("y"), Node->NodePosY);
+				NodeValues.Add(MakeShared<FJsonValueObject>(NodeObject));
+				if (NodeValues.Num() >= 64)
+				{
+					break;
+				}
+			}
+			GraphObject->SetArrayField(TEXT("nodes"), NodeValues);
+			OutGraphValues.Add(MakeShared<FJsonValueObject>(GraphObject));
+			if (OutGraphValues.Num() >= 64)
+			{
+				break;
+			}
+		}
+	}
+
+	static TSharedPtr<FJsonObject> BuildBlueprintGraphSnapshot(const FString& BlueprintPath)
+	{
+		const FString NormalizedPath = NormalizeAssetPackagePath(BlueprintPath);
+		if (NormalizedPath.IsEmpty())
+		{
+			return MakeToolErrorObject(TEXT("missing_blueprint_path"), TEXT("blueprint_path is required."));
+		}
+		UBlueprint* Blueprint = LoadBlueprintAsset(NormalizedPath);
+		if (Blueprint == nullptr)
+		{
+			return MakeToolErrorObject(TEXT("blueprint_not_found"), FString::Printf(TEXT("Blueprint not found: %s"), *NormalizedPath));
+		}
+
+		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
+		SnapshotObject->SetStringField(TEXT("blueprint_path"), NormalizedPath);
+		SnapshotObject->SetStringField(TEXT("blueprint_name"), Blueprint->GetName());
+		SnapshotObject->SetStringField(TEXT("status"), BlueprintStatusToString(Blueprint->Status));
+		SnapshotObject->SetBoolField(TEXT("is_dirty"), Blueprint->GetPackage() != nullptr && Blueprint->GetPackage()->IsDirty());
+		SnapshotObject->SetBoolField(TEXT("is_data_only"), FBlueprintEditorUtils::IsDataOnlyBlueprint(Blueprint));
+		if (Blueprint->ParentClass != nullptr)
+		{
+			SnapshotObject->SetStringField(TEXT("parent_class"), Blueprint->ParentClass->GetPathName());
+		}
+
+		TArray<TSharedPtr<FJsonValue>> GraphValues;
+#if WITH_EDITORONLY_DATA
+		AddGraphSummaries(Blueprint->UbergraphPages, TEXT("event"), GraphValues);
+		AddGraphSummaries(Blueprint->FunctionGraphs, TEXT("function"), GraphValues);
+		AddGraphSummaries(Blueprint->MacroGraphs, TEXT("macro"), GraphValues);
+#endif
+		SnapshotObject->SetArrayField(TEXT("graphs"), GraphValues);
+
+		TArray<TSharedPtr<FJsonValue>> VariableValues;
+		for (const FBPVariableDescription& Variable : Blueprint->NewVariables)
+		{
+			TSharedPtr<FJsonObject> VariableObject = MakeShared<FJsonObject>();
+			VariableObject->SetStringField(TEXT("variable_name"), Variable.VarName.ToString());
+			VariableObject->SetStringField(TEXT("variable_type"), Variable.VarType.PinCategory.ToString());
+			VariableObject->SetStringField(TEXT("category"), Variable.Category.ToString());
+			VariableValues.Add(MakeShared<FJsonValueObject>(VariableObject));
+			if (VariableValues.Num() >= 64)
+			{
+				break;
+			}
+		}
+		SnapshotObject->SetArrayField(TEXT("variables"), VariableValues);
+
+		TArray<TSharedPtr<FJsonValue>> ComponentValues;
+		if (Blueprint->SimpleConstructionScript != nullptr)
+		{
+			for (const USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+			{
+				if (Node == nullptr)
+				{
+					continue;
+				}
+				TSharedPtr<FJsonObject> ComponentObject = MakeShared<FJsonObject>();
+				ComponentObject->SetStringField(TEXT("component_name"), Node->GetVariableName().ToString());
+				if (Node->ComponentTemplate != nullptr)
+				{
+					ComponentObject->SetStringField(TEXT("component_class"), Node->ComponentTemplate->GetClass()->GetPathName());
+				}
+				ComponentValues.Add(MakeShared<FJsonValueObject>(ComponentObject));
+				if (ComponentValues.Num() >= 64)
+				{
+					break;
+				}
+			}
+		}
+		SnapshotObject->SetArrayField(TEXT("components"), ComponentValues);
+		return SnapshotObject;
 	}
 }
 
@@ -364,6 +580,17 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 		ResultObject->SetObjectField(TEXT("structuredContent"), FUEAgentEditorToolCatalog::BuildToolsListJson());
 		return ResultObject;
 	}
+	if (ToolName.Equals(TEXT("get_blueprint_graph"), ESearchCase::IgnoreCase))
+	{
+		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
+		const TSharedPtr<FJsonObject> ArgumentsObject = ParamsObject.IsValid() && ParamsObject->TryGetObjectField(TEXT("arguments"), ArgumentsField) && ArgumentsField != nullptr ? *ArgumentsField : nullptr;
+		FString BlueprintPath;
+		if (ArgumentsObject.IsValid())
+		{
+			ArgumentsObject->TryGetStringField(TEXT("blueprint_path"), BlueprintPath);
+		}
+		return BuildBlueprintGraphResult(BlueprintPath);
+	}
 
 	ResultObject->SetBoolField(TEXT("isError"), true);
 	TextContent->SetStringField(TEXT("text"), FString::Printf(TEXT("Tool '%s' requires the existing HTTP Proposal confirmation flow and cannot be executed through raw MCP/TCP."), *ToolName));
@@ -372,6 +599,44 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 	return ResultObject;
 }
 
+TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildBlueprintGraphResult(const FString& BlueprintPath) const
+{
+	TSharedPtr<FJsonObject> SnapshotObject;
+	if (IsInGameThread())
+	{
+		SnapshotObject = UEAgentEditorToolServerPrivate::BuildBlueprintGraphSnapshot(BlueprintPath);
+	}
+	else
+	{
+		FEvent* CompletionEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [BlueprintPath, &SnapshotObject, CompletionEvent]()
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::BuildBlueprintGraphSnapshot(BlueprintPath);
+			CompletionEvent->Trigger();
+		});
+		const bool bCompleted = CompletionEvent->Wait(FTimespan::FromSeconds(3));
+		FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		if (!bCompleted)
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading Blueprint graph metadata on the game thread."));
+		}
+	}
+
+	TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ContentValues;
+	TSharedPtr<FJsonObject> TextContent = MakeShared<FJsonObject>();
+	TextContent->SetStringField(TEXT("type"), TEXT("text"));
+	TextContent->SetStringField(TEXT("text"), SerializeJsonObject(SnapshotObject));
+	ContentValues.Add(MakeShared<FJsonValueObject>(TextContent));
+	ResultObject->SetArrayField(TEXT("content"), ContentValues);
+	const TSharedPtr<FJsonObject> StructuredObject = SnapshotObject.IsValid() ? SnapshotObject : MakeShared<FJsonObject>();
+	ResultObject->SetObjectField(TEXT("structuredContent"), StructuredObject);
+	if (SnapshotObject.IsValid() && SnapshotObject->HasField(TEXT("reason")))
+	{
+		ResultObject->SetBoolField(TEXT("isError"), true);
+	}
+	return ResultObject;
+}
 TSharedPtr<FJsonObject> FUEAgentEditorToolServer::ParseJsonObject(const FString& Text)
 {
 	TSharedPtr<FJsonObject> JsonObject;

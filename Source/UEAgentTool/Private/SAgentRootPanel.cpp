@@ -378,6 +378,27 @@ namespace UEAgentRootPanelPrivate
 		return Cast<UBlueprint>(LoadEditorAsset(BlueprintPath));
 	}
 
+	static FString BlueprintStatusToOperationString(const EBlueprintStatus Status)
+	{
+		switch (Status)
+		{
+		case BS_Unknown:
+			return TEXT("unknown");
+		case BS_Dirty:
+			return TEXT("dirty");
+		case BS_Error:
+			return TEXT("error");
+		case BS_UpToDate:
+			return TEXT("up_to_date");
+		case BS_BeingCreated:
+			return TEXT("being_created");
+		case BS_UpToDateWithWarnings:
+			return TEXT("up_to_date_with_warnings");
+		default:
+			return TEXT("unknown");
+		}
+	}
+
 	static ECollisionTraceFlag CollisionTraceFlagFromString(const FString& Value, bool& bOutValid)
 	{
 		const FString NormalizedValue = Value.TrimStartAndEnd().ToLower();
@@ -1195,6 +1216,50 @@ namespace UEAgentRootPanelPrivate
 		return ExecutionResult;
 	}
 
+	static FEditorOperationExecutionResult ExecuteCompileBlueprint(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("FKismetEditorUtilities.CompileBlueprint"));
+
+		const FString BlueprintPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("blueprint_path")));
+		if (BlueprintPath.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("blueprint_path is required."));
+			return ExecutionResult;
+		}
+
+		UBlueprint* Blueprint = LoadBlueprintAsset(BlueprintPath);
+		if (Blueprint == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_not_found"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return ExecutionResult;
+		}
+
+		const FString PreviousStatus = BlueprintStatusToOperationString(Blueprint->Status);
+		Blueprint->Modify();
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+		const FString CompileStatus = BlueprintStatusToOperationString(Blueprint->Status);
+		const bool bCompileSuccess = Blueprint->Status != BS_Error;
+
+		ExecutionResult.bSuccess = bCompileSuccess;
+		ExecutionResult.ExecutionState = bCompileSuccess ? TEXT("completed") : TEXT("failed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Blueprint compile is an editor action; inspect compiler output and use source control or editor undo for related graph edits if needed.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("blueprint_path"), BlueprintPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("previous_status"), PreviousStatus);
+		ExecutionResult.ResultObject->SetStringField(TEXT("compile_status"), CompileStatus);
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), Blueprint->GetOutermost() != nullptr && Blueprint->GetOutermost()->IsDirty());
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), Blueprint->GetOutermost() != nullptr ? Blueprint->GetOutermost()->GetName() : FString());
+		if (!bCompileSuccess)
+		{
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_compile_failed"), FString::Printf(TEXT("Blueprint compile status: %s"), *CompileStatus));
+		}
+		return ExecutionResult;
+	}
+
 	static bool BindEditorOperationExecutor(FUEAgentEditorToolDefinition& Definition)
 	{
 		if (Definition.OperationType.Equals(TEXT("rename_selected_asset"), ESearchCase::IgnoreCase))
@@ -1225,6 +1290,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("create_blueprint_event_stub"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteCreateBlueprintEventStub);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("compile_blueprint"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteCompileBlueprint);
 			return true;
 		}
 		return false;

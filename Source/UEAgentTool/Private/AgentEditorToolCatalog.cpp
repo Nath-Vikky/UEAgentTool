@@ -10,14 +10,15 @@ namespace UEAgentEditorToolCatalogPrivate
 		const FString& Description,
 		const FString& Category,
 		const TArray<FString>& RequiredFields,
-		const TArray<FString>& OptionalFields)
+		const TArray<FString>& OptionalFields,
+		const FString& SideEffectLevel = TEXT("confirmed_write"))
 	{
 		FUEAgentEditorToolDefinition Definition;
 		Definition.ToolName = ToolName;
 		Definition.OperationType = OperationType;
 		Definition.Description = Description;
 		Definition.Category = Category;
-		Definition.SideEffectLevel = TEXT("confirmed_write");
+		Definition.SideEffectLevel = SideEffectLevel;
 		Definition.RequiredFields = RequiredFields;
 		Definition.OptionalFields = OptionalFields;
 		Definition.bEnabled = true;
@@ -70,6 +71,21 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		TEXT("blueprint"),
 		{ TEXT("blueprint_path"), TEXT("event_name") },
 		{ TEXT("graph_name"), TEXT("node_comment") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("compile_blueprint")),
+		TEXT("compile_blueprint"),
+		TEXT("Compile one Blueprint after backend Proposal confirmation."),
+		TEXT("blueprint"),
+		{ TEXT("blueprint_path") },
+		{ TEXT("compile_mode") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("get_blueprint_graph")),
+		TEXT("get_blueprint_graph"),
+		TEXT("Read Blueprint graph metadata through the optional TCP tool server."),
+		TEXT("blueprint"),
+		{ TEXT("blueprint_path") },
+		{},
+		TEXT("read_only")));
 	return Definitions;
 }
 
