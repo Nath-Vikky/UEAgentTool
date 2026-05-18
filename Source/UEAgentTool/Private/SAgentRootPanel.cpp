@@ -25,11 +25,14 @@
 #include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraphSchema_K2.h"
+#include "Editor.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/Level.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/World.h"
 #include "Framework/Application/SlateApplication.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Character.h"
@@ -41,6 +44,8 @@
 #include "K2Node_Event.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "MaterialShared.h"
 #include "Misc/PackageName.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -324,6 +329,39 @@ namespace UEAgentRootPanelPrivate
 		}
 
 		OutVector = FVector(X, Y, Z);
+		return true;
+	}
+
+	static bool TryReadLinearColorObject(const TSharedPtr<FJsonObject>& JsonObject, FLinearColor& OutColor)
+	{
+		if (!JsonObject.IsValid())
+		{
+			return false;
+		}
+
+		double R = 0.0;
+		double G = 0.0;
+		double B = 0.0;
+		double A = 1.0;
+		if (!TryGetNumberComponent(JsonObject, TEXT("r"), R) && !TryGetNumberComponent(JsonObject, TEXT("R"), R))
+		{
+			return false;
+		}
+		if (!TryGetNumberComponent(JsonObject, TEXT("g"), G) && !TryGetNumberComponent(JsonObject, TEXT("G"), G))
+		{
+			return false;
+		}
+		if (!TryGetNumberComponent(JsonObject, TEXT("b"), B) && !TryGetNumberComponent(JsonObject, TEXT("B"), B))
+		{
+			return false;
+		}
+		double OptionalA = 1.0;
+		if (TryGetNumberComponent(JsonObject, TEXT("a"), OptionalA) || TryGetNumberComponent(JsonObject, TEXT("A"), OptionalA))
+		{
+			A = OptionalA;
+		}
+
+		OutColor = FLinearColor(static_cast<float>(R), static_cast<float>(G), static_cast<float>(B), static_cast<float>(A));
 		return true;
 	}
 
@@ -1690,6 +1728,167 @@ namespace UEAgentRootPanelPrivate
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
 		return ExecutionResult;
 	}
+	static FEditorOperationExecutionResult ExecutePlaceActorInLevel(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("GEditor.AddActor"));
+
+		const FString ActorClassPath = GetScalarFieldAsString(PayloadObject, TEXT("actor_class")).TrimStartAndEnd();
+		const FString ActorLabel = GetScalarFieldAsString(PayloadObject, TEXT("actor_label")).TrimStartAndEnd();
+		if (ActorClassPath.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("actor_class is required."));
+			return ExecutionResult;
+		}
+
+		UClass* ActorClass = ResolveBlueprintParentClass(ActorClassPath);
+		if (ActorClass == nullptr || !ActorClass->IsChildOf(AActor::StaticClass()))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("actor_class_invalid"), ActorClassPath);
+			return ExecutionResult;
+		}
+		if (GEditor == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("editor_unavailable"), TEXT("GEditor is unavailable."));
+			return ExecutionResult;
+		}
+
+		UWorld* EditorWorld = GEditor->GetEditorWorldContext().World();
+		if (EditorWorld == nullptr || EditorWorld->GetCurrentLevel() == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("editor_world_unavailable"), TEXT("No editable level is currently available."));
+			return ExecutionResult;
+		}
+
+		FVector Location = FVector::ZeroVector;
+		FRotator Rotation = FRotator::ZeroRotator;
+		FVector Scale = FVector::OneVector;
+		const TSharedPtr<FJsonObject> TransformObject = GetObjectField(PayloadObject, TEXT("transform"));
+		if (TransformObject.IsValid())
+		{
+			TryReadVectorField(TransformObject, TEXT("location"), Location);
+			TryReadRotatorField(TransformObject, TEXT("rotation"), Rotation);
+			TryReadVectorField(TransformObject, TEXT("scale"), Scale);
+		}
+
+		const FTransform ActorTransform(Rotation, Location, Scale);
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Place Actor In Level")));
+		EditorWorld->Modify();
+		ULevel* CurrentLevel = EditorWorld->GetCurrentLevel();
+		CurrentLevel->Modify();
+		AActor* NewActor = GEditor->AddActor(CurrentLevel, ActorClass, ActorTransform, false, RF_Transactional);
+		if (NewActor == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("failed");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("actor_spawn_failed"), ActorClassPath);
+			return ExecutionResult;
+		}
+
+		NewActor->SetFlags(RF_Transactional);
+		NewActor->Modify();
+		if (!ActorLabel.IsEmpty())
+		{
+			NewActor->SetActorLabel(ActorLabel);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("actor_label"), ActorLabel);
+		}
+		CurrentLevel->MarkPackageDirty();
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to remove the placed Actor. The level is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("actor_class"), ActorClass->GetPathName());
+		ExecutionResult.ResultObject->SetStringField(TEXT("actor_label"), NewActor->GetActorLabel());
+		ExecutionResult.ResultObject->SetStringField(TEXT("actor_name"), NewActor->GetName());
+		ExecutionResult.ResultObject->SetStringField(TEXT("level_name"), CurrentLevel->GetOutermost() != nullptr ? CurrentLevel->GetOutermost()->GetName() : CurrentLevel->GetName());
+		ExecutionResult.ResultObject->SetStringField(TEXT("location"), Location.ToString());
+		ExecutionResult.ResultObject->SetStringField(TEXT("rotation"), Rotation.ToString());
+		ExecutionResult.ResultObject->SetStringField(TEXT("scale"), Scale.ToString());
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_actors"), NewActor->GetActorLabel());
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), CurrentLevel->GetOutermost() != nullptr ? CurrentLevel->GetOutermost()->GetName() : FString());
+		return ExecutionResult;
+	}
+
+	static FEditorOperationExecutionResult ExecuteSetMaterialInstanceParameter(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("UMaterialInstanceConstant.SetParameterValueEditorOnly"));
+
+		const FString MaterialInstancePath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("material_instance_path")));
+		const FString ParameterName = GetScalarFieldAsString(PayloadObject, TEXT("parameter_name")).TrimStartAndEnd();
+		const FString ParameterType = GetScalarFieldAsString(PayloadObject, TEXT("parameter_type")).TrimStartAndEnd().ToLower();
+		if (MaterialInstancePath.IsEmpty() || ParameterName.IsEmpty() || ParameterType.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("material_instance_path, parameter_name and parameter_type are required."));
+			return ExecutionResult;
+		}
+
+		UMaterialInstanceConstant* MaterialInstance = Cast<UMaterialInstanceConstant>(LoadEditorAsset(MaterialInstancePath));
+		if (MaterialInstance == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("material_instance_not_found"), FString::Printf(TEXT("Material Instance Constant not found: %s"), *MaterialInstancePath));
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Set Material Instance Parameter")));
+		MaterialInstance->Modify();
+		const FMaterialParameterInfo ParameterInfo{FName(*ParameterName)};
+
+		if (ParameterType == TEXT("scalar"))
+		{
+			double ScalarValue = 0.0;
+			if (!PayloadObject->TryGetNumberField(TEXT("value"), ScalarValue))
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("scalar_value_required"), TEXT("value must be a number for scalar parameters."));
+				return ExecutionResult;
+			}
+			MaterialInstance->SetScalarParameterValueEditorOnly(ParameterInfo, static_cast<float>(ScalarValue));
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("value"), FString::SanitizeFloat(ScalarValue));
+		}
+		else if (ParameterType == TEXT("vector"))
+		{
+			FLinearColor ColorValue;
+			if (!TryReadLinearColorObject(GetObjectField(PayloadObject, TEXT("value")), ColorValue))
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("vector_value_required"), TEXT("value must contain r, g, b and optional a for vector parameters."));
+				return ExecutionResult;
+			}
+			MaterialInstance->SetVectorParameterValueEditorOnly(ParameterInfo, ColorValue);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("value"), ColorValue.ToString());
+		}
+		else
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("parameter_type_unsupported"), TEXT("Only scalar and vector parameters are supported in v1."));
+			return ExecutionResult;
+		}
+
+		MaterialInstance->PostEditChange();
+		MaterialInstance->MarkPackageDirty();
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo or source control to revert the Material Instance parameter change. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("material_instance_path"), MaterialInstancePath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("parameter_name"), ParameterName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("parameter_type"), ParameterType);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), MaterialInstance->GetOutermost() != nullptr ? MaterialInstance->GetOutermost()->GetName() : FString());
+		return ExecutionResult;
+	}
+
 	static bool BindEditorOperationExecutor(FUEAgentEditorToolDefinition& Definition)
 	{
 		if (Definition.OperationType.Equals(TEXT("rename_selected_asset"), ESearchCase::IgnoreCase))
@@ -1740,6 +1939,16 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("add_umg_widget"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteAddUmgWidget);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("place_actor_in_level"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecutePlaceActorInLevel);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("set_material_instance_parameter"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetMaterialInstanceParameter);
 			return true;
 		}
 		return false;
