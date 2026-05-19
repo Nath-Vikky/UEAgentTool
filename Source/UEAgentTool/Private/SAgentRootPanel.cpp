@@ -45,6 +45,7 @@
 #include "IAssetTools.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_Event.h"
+#include "K2Node_ExecutionSequence.h"
 #include "K2Node_IfThenElse.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
@@ -1671,6 +1672,29 @@ namespace UEAgentRootPanelPrivate
 		const bool bCompileAfterEdit = GetBoolFieldOrDefault(PayloadObject, TEXT("compile_after_edit"), true);
 		const bool bIsPrintStringTemplate = TemplateId.Equals(TEXT("print_string"), ESearchCase::IgnoreCase);
 		const bool bIsBranchPrintStringTemplate = TemplateId.Equals(TEXT("branch_print_string"), ESearchCase::IgnoreCase);
+		const bool bIsSequencePrintStringsTemplate = TemplateId.Equals(TEXT("sequence_print_strings"), ESearchCase::IgnoreCase);
+		TArray<FString> SequenceMessages;
+		const TArray<TSharedPtr<FJsonValue>>* MessageValues = nullptr;
+		if (PayloadObject.IsValid() && PayloadObject->TryGetArrayField(TEXT("messages"), MessageValues) && MessageValues != nullptr)
+		{
+			for (const TSharedPtr<FJsonValue>& MessageValue : *MessageValues)
+			{
+				if (MessageValue.IsValid() && SequenceMessages.Num() < 2)
+				{
+					const FString SequenceMessage = MessageValue->AsString();
+					if (!SequenceMessage.IsEmpty())
+					{
+						SequenceMessages.Add(SequenceMessage);
+					}
+				}
+			}
+		}
+		while (SequenceMessages.Num() < 2)
+		{
+			SequenceMessages.Add(SequenceMessages.Num() == 0 && !Message.IsEmpty()
+				? Message
+				: FString::Printf(TEXT("Sequence step %d from UEAgent"), SequenceMessages.Num() + 1));
+		}
 		double DurationSeconds = 2.0;
 		PayloadObject->TryGetNumberField(TEXT("duration"), DurationSeconds);
 		if (GraphName.IsEmpty())
@@ -1683,10 +1707,10 @@ namespace UEAgentRootPanelPrivate
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("blueprint_path and template_id are required."));
 			return ExecutionResult;
 		}
-		if (!bIsPrintStringTemplate && !bIsBranchPrintStringTemplate)
+		if (!bIsPrintStringTemplate && !bIsBranchPrintStringTemplate && !bIsSequencePrintStringsTemplate)
 		{
 			ExecutionResult.ExecutionState = TEXT("blocked");
-			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string and branch_print_string are supported in v1."));
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string, branch_print_string, and sequence_print_strings are supported in v1."));
 			return ExecutionResult;
 		}
 		if (BranchPath.IsEmpty())
@@ -1811,6 +1835,24 @@ namespace UEAgentRootPanelPrivate
 			}
 			TargetGraph->AddNode(BranchNode, true, true);
 		}
+		UK2Node_ExecutionSequence* SequenceNode = nullptr;
+		if (bIsSequencePrintStringsTemplate)
+		{
+			SequenceNode = NewObject<UK2Node_ExecutionSequence>(TargetGraph);
+			SequenceNode->SetFlags(RF_Transactional);
+			SequenceNode->CreateNewGuid();
+			SequenceNode->PostPlacedNewNode();
+			SequenceNode->AllocateDefaultPins();
+			SequenceNode->NodePosX = static_cast<int32>(NodePosition.X);
+			SequenceNode->NodePosY = static_cast<int32>(NodePosition.Y);
+			if (!NodeComment.IsEmpty())
+			{
+				SequenceNode->NodeComment = NodeComment;
+				SequenceNode->bCommentBubblePinned = true;
+				SequenceNode->bCommentBubbleVisible = true;
+			}
+			TargetGraph->AddNode(SequenceNode, true, true);
+		}
 
 		UK2Node_CallFunction* CallNode = NewObject<UK2Node_CallFunction>(TargetGraph);
 		CallNode->SetFlags(RF_Transactional);
@@ -1821,7 +1863,7 @@ namespace UEAgentRootPanelPrivate
 		CallNode->PostPlacedNewNode();
 		CallNode->AllocateDefaultPins();
 
-		CallNode->NodePosX = static_cast<int32>(bIsBranchPrintStringTemplate ? NodePosition.X + 360.0 : NodePosition.X);
+		CallNode->NodePosX = static_cast<int32>((bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate) ? NodePosition.X + 360.0 : NodePosition.X);
 		CallNode->NodePosY = static_cast<int32>(NodePosition.Y);
 		if (!NodeComment.IsEmpty())
 		{
@@ -1832,7 +1874,7 @@ namespace UEAgentRootPanelPrivate
 
 		if (UEdGraphPin* InStringPin = CallNode->FindPin(TEXT("InString")))
 		{
-			InStringPin->DefaultValue = Message.IsEmpty() ? TEXT("Hello from UEAgent") : Message;
+			InStringPin->DefaultValue = bIsSequencePrintStringsTemplate ? SequenceMessages[0] : (Message.IsEmpty() ? TEXT("Hello from UEAgent") : Message);
 		}
 		if (UEdGraphPin* PrintToScreenPin = CallNode->FindPin(TEXT("bPrintToScreen")))
 		{
@@ -1848,6 +1890,42 @@ namespace UEAgentRootPanelPrivate
 		}
 
 		TargetGraph->AddNode(CallNode, true, true);
+		TArray<UK2Node_CallFunction*> PrintNodes;
+		PrintNodes.Add(CallNode);
+		if (bIsSequencePrintStringsTemplate)
+		{
+			for (int32 MessageIndex = 1; MessageIndex < SequenceMessages.Num(); ++MessageIndex)
+			{
+				UK2Node_CallFunction* ExtraCallNode = NewObject<UK2Node_CallFunction>(TargetGraph);
+				ExtraCallNode->SetFlags(RF_Transactional);
+				ExtraCallNode->FunctionReference.SetExternalMember(
+					GET_FUNCTION_NAME_CHECKED(UKismetSystemLibrary, PrintString),
+					UKismetSystemLibrary::StaticClass());
+				ExtraCallNode->CreateNewGuid();
+				ExtraCallNode->PostPlacedNewNode();
+				ExtraCallNode->AllocateDefaultPins();
+				ExtraCallNode->NodePosX = static_cast<int32>(NodePosition.X + 360.0);
+				ExtraCallNode->NodePosY = static_cast<int32>(NodePosition.Y + MessageIndex * 180.0);
+				if (UEdGraphPin* InStringPin = ExtraCallNode->FindPin(TEXT("InString")))
+				{
+					InStringPin->DefaultValue = SequenceMessages[MessageIndex];
+				}
+				if (UEdGraphPin* PrintToScreenPin = ExtraCallNode->FindPin(TEXT("bPrintToScreen")))
+				{
+					PrintToScreenPin->DefaultValue = bPrintToScreen ? TEXT("true") : TEXT("false");
+				}
+				if (UEdGraphPin* PrintToLogPin = ExtraCallNode->FindPin(TEXT("bPrintToLog")))
+				{
+					PrintToLogPin->DefaultValue = bPrintToLog ? TEXT("true") : TEXT("false");
+				}
+				if (UEdGraphPin* DurationPin = ExtraCallNode->FindPin(TEXT("Duration")))
+				{
+					DurationPin->DefaultValue = FString::SanitizeFloat(DurationSeconds);
+				}
+				TargetGraph->AddNode(ExtraCallNode, true, true);
+				PrintNodes.Add(ExtraCallNode);
+			}
+		}
 		TArray<FString> LinkedPinsSummaries;
 		auto FindExecPin = [](UEdGraphNode* Node, const EEdGraphPinDirection Direction, const FName PreferredName) -> UEdGraphPin*
 		{
@@ -1922,6 +2000,29 @@ namespace UEAgentRootPanelPrivate
 				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay -> Branch -> PrintString failed."));
 			}
 		}
+		else if (bIsSequencePrintStringsTemplate)
+		{
+			UEdGraphPin* SequenceInputPin = FindExecPin(SequenceNode, EGPD_Input, UEdGraphSchema_K2::PN_Execute);
+			bool bEntryToSequenceLinked = EntryEventName.IsEmpty();
+			if (EntryEventNode != nullptr)
+			{
+				UEdGraphPin* EntryOutputPin = FindExecPin(EntryEventNode, EGPD_Output, UEdGraphSchema_K2::PN_Then);
+				bEntryToSequenceLinked = ConnectExecPins(EntryEventNode, EntryOutputPin, SequenceNode, SequenceInputPin);
+			}
+			bool bSequenceOutputsLinked = SequenceNode != nullptr;
+			for (int32 NodeIndex = 0; NodeIndex < PrintNodes.Num(); ++NodeIndex)
+			{
+				UEdGraphPin* SequenceOutputPin = SequenceNode != nullptr ? SequenceNode->GetThenPinGivenIndex(NodeIndex) : nullptr;
+				UEdGraphPin* PrintInputPin = FindExecPin(PrintNodes[NodeIndex], EGPD_Input, UEdGraphSchema_K2::PN_Execute);
+				bSequenceOutputsLinked = ConnectExecPins(SequenceNode, SequenceOutputPin, PrintNodes[NodeIndex], PrintInputPin) && bSequenceOutputsLinked;
+			}
+			bTemplateLinkSuccess = bEntryToSequenceLinked && bSequenceOutputsLinked;
+			if (!bTemplateLinkSuccess)
+			{
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay -> Sequence -> PrintString exec chain."));
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay -> Sequence -> PrintString failed."));
+			}
+		}
 		else if (EntryEventNode != nullptr)
 		{
 			UEdGraphPin* SourceExecPin = FindExecPin(EntryEventNode, EGPD_Output, UEdGraphSchema_K2::PN_Then);
@@ -1963,7 +2064,23 @@ namespace UEAgentRootPanelPrivate
 			ExecutionResult.ResultObject->SetBoolField(TEXT("condition_default"), bConditionDefault);
 			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), BranchNode->GetName());
 		}
+		if (SequenceNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetNumberField(TEXT("sequence_output_count"), PrintNodes.Num());
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), SequenceNode->GetName());
+			for (const FString& SequenceMessage : SequenceMessages)
+			{
+				AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("messages"), SequenceMessage);
+			}
+		}
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), CallNode->GetName());
+		for (int32 NodeIndex = 1; NodeIndex < PrintNodes.Num(); ++NodeIndex)
+		{
+			if (PrintNodes[NodeIndex] != nullptr)
+			{
+				AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), PrintNodes[NodeIndex]->GetName());
+			}
+		}
 		if (bCreatedEntryEvent && EntryEventNode != nullptr)
 		{
 			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), EntryEventNode->GetName());
@@ -1978,9 +2095,19 @@ namespace UEAgentRootPanelPrivate
 		{
 			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), BranchNode->GetName());
 		}
-		if (EntryEventNode != nullptr || BranchNode != nullptr)
+		if (SequenceNode != nullptr)
 		{
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), CallNode->GetName());
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), SequenceNode->GetName());
+		}
+		if (EntryEventNode != nullptr || BranchNode != nullptr || SequenceNode != nullptr)
+		{
+			for (UK2Node_CallFunction* PrintNode : PrintNodes)
+			{
+				if (PrintNode != nullptr)
+				{
+					AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), PrintNode->GetName());
+				}
+			}
 		}
 		for (const FString& LinkedPinsSummary : LinkedPinsSummaries)
 		{
@@ -1994,6 +2121,10 @@ namespace UEAgentRootPanelPrivate
 		{
 			SetAppliedField(ExecutionResult.ResultObject, TEXT("branch_path"), BranchPath);
 			SetAppliedField(ExecutionResult.ResultObject, TEXT("condition_default"), bConditionDefault ? TEXT("true") : TEXT("false"));
+		}
+		if (SequenceNode != nullptr)
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("sequence_output_count"), FString::FromInt(PrintNodes.Num()));
 		}
 		if (!bCompileSuccess)
 		{
