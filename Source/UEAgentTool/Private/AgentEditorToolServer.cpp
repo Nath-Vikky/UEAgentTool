@@ -204,7 +204,115 @@ namespace UEAgentEditorToolServerPrivate
 		return ResultObject;
 	}
 
-	static void AddGraphSummaries(const TArray<UEdGraph*>& Graphs, const FString& GraphType, TArray<TSharedPtr<FJsonValue>>& OutGraphValues)
+	static FString PinDirectionToString(const EEdGraphPinDirection Direction)
+	{
+		switch (Direction)
+		{
+		case EGPD_Input:
+			return TEXT("input");
+		case EGPD_Output:
+			return TEXT("output");
+		default:
+			return TEXT("unknown");
+		}
+	}
+
+	static FString PinTypeToSnapshotString(const FEdGraphPinType& PinType)
+	{
+		FString TypeText = PinType.PinCategory.ToString();
+		if (!PinType.PinSubCategory.IsNone())
+		{
+			TypeText += FString::Printf(TEXT(":%s"), *PinType.PinSubCategory.ToString());
+		}
+		if (PinType.PinSubCategoryObject.IsValid())
+		{
+			TypeText += FString::Printf(TEXT(":%s"), *PinType.PinSubCategoryObject->GetPathName());
+		}
+		if (PinType.IsArray())
+		{
+			TypeText += TEXT("[]");
+		}
+		else if (PinType.IsSet())
+		{
+			TypeText += TEXT("<set>");
+		}
+		else if (PinType.IsMap())
+		{
+			TypeText += TEXT("<map>");
+		}
+		return TypeText;
+	}
+
+	static void AddPinSummaries(
+		const UEdGraphNode* Node,
+		TArray<TSharedPtr<FJsonValue>>& OutPinValues,
+		int32& OutInputPinCount,
+		int32& OutOutputPinCount,
+		int32& OutLinkCount)
+	{
+		if (Node == nullptr)
+		{
+			return;
+		}
+
+		for (const UEdGraphPin* Pin : Node->Pins)
+		{
+			if (Pin == nullptr)
+			{
+				continue;
+			}
+
+			if (Pin->Direction == EGPD_Input)
+			{
+				++OutInputPinCount;
+			}
+			else if (Pin->Direction == EGPD_Output)
+			{
+				++OutOutputPinCount;
+			}
+
+			TSharedPtr<FJsonObject> PinObject = MakeShared<FJsonObject>();
+			PinObject->SetStringField(TEXT("pin_id"), Pin->PinId.ToString(EGuidFormats::DigitsWithHyphens));
+			PinObject->SetStringField(TEXT("pin_name"), Pin->PinName.ToString());
+			PinObject->SetStringField(TEXT("direction"), PinDirectionToString(Pin->Direction));
+			PinObject->SetStringField(TEXT("pin_type"), PinTypeToSnapshotString(Pin->PinType));
+			PinObject->SetNumberField(TEXT("linked_to_count"), Pin->LinkedTo.Num());
+
+			TArray<TSharedPtr<FJsonValue>> LinkValues;
+			for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
+			{
+				if (LinkedPin == nullptr || LinkedPin->GetOwningNode() == nullptr)
+				{
+					continue;
+				}
+				++OutLinkCount;
+				TSharedPtr<FJsonObject> LinkObject = MakeShared<FJsonObject>();
+				LinkObject->SetStringField(TEXT("linked_node_id"), LinkedPin->GetOwningNode()->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+				LinkObject->SetStringField(TEXT("linked_node_name"), LinkedPin->GetOwningNode()->GetName());
+				LinkObject->SetStringField(TEXT("linked_pin_id"), LinkedPin->PinId.ToString(EGuidFormats::DigitsWithHyphens));
+				LinkObject->SetStringField(TEXT("linked_pin_name"), LinkedPin->PinName.ToString());
+				LinkValues.Add(MakeShared<FJsonValueObject>(LinkObject));
+				if (LinkValues.Num() >= 8)
+				{
+					break;
+				}
+			}
+			PinObject->SetArrayField(TEXT("linked_to"), LinkValues);
+			OutPinValues.Add(MakeShared<FJsonValueObject>(PinObject));
+			if (OutPinValues.Num() >= 32)
+			{
+				break;
+			}
+		}
+	}
+
+	static void AddGraphSummaries(
+		const TArray<UEdGraph*>& Graphs,
+		const FString& GraphType,
+		TArray<TSharedPtr<FJsonValue>>& OutGraphValues,
+		int32& OutTotalNodeCount,
+		int32& OutTotalPinCount,
+		int32& OutTotalLinkCount)
 	{
 		for (const UEdGraph* Graph : Graphs)
 		{
@@ -213,11 +321,14 @@ namespace UEAgentEditorToolServerPrivate
 				continue;
 			}
 			TSharedPtr<FJsonObject> GraphObject = MakeShared<FJsonObject>();
+			GraphObject->SetStringField(TEXT("graph_id"), Graph->GraphGuid.ToString(EGuidFormats::DigitsWithHyphens));
 			GraphObject->SetStringField(TEXT("graph_name"), Graph->GetName());
 			GraphObject->SetStringField(TEXT("graph_type"), GraphType);
 			GraphObject->SetNumberField(TEXT("node_count"), Graph->Nodes.Num());
 
 			TArray<TSharedPtr<FJsonValue>> NodeValues;
+			int32 GraphPinCount = 0;
+			int32 GraphLinkCount = 0;
 			for (const UEdGraphNode* Node : Graph->Nodes)
 			{
 				if (Node == nullptr)
@@ -225,18 +336,42 @@ namespace UEAgentEditorToolServerPrivate
 					continue;
 				}
 				TSharedPtr<FJsonObject> NodeObject = MakeShared<FJsonObject>();
+				NodeObject->SetStringField(TEXT("node_id"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
 				NodeObject->SetStringField(TEXT("node_name"), Node->GetName());
 				NodeObject->SetStringField(TEXT("node_class"), Node->GetClass() != nullptr ? Node->GetClass()->GetName() : TEXT("unknown"));
 				NodeObject->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
 				NodeObject->SetNumberField(TEXT("x"), Node->NodePosX);
 				NodeObject->SetNumberField(TEXT("y"), Node->NodePosY);
+				if (!Node->NodeComment.IsEmpty())
+				{
+					NodeObject->SetStringField(TEXT("comment"), Node->NodeComment);
+				}
+
+				TArray<TSharedPtr<FJsonValue>> PinValues;
+				int32 InputPinCount = 0;
+				int32 OutputPinCount = 0;
+				int32 NodeLinkCount = 0;
+				AddPinSummaries(Node, PinValues, InputPinCount, OutputPinCount, NodeLinkCount);
+				NodeObject->SetNumberField(TEXT("pin_count"), Node->Pins.Num());
+				NodeObject->SetNumberField(TEXT("input_pin_count"), InputPinCount);
+				NodeObject->SetNumberField(TEXT("output_pin_count"), OutputPinCount);
+				NodeObject->SetNumberField(TEXT("link_count"), NodeLinkCount);
+				NodeObject->SetArrayField(TEXT("pins"), PinValues);
+
+				GraphPinCount += Node->Pins.Num();
+				GraphLinkCount += NodeLinkCount;
 				NodeValues.Add(MakeShared<FJsonValueObject>(NodeObject));
 				if (NodeValues.Num() >= 64)
 				{
 					break;
 				}
 			}
+			GraphObject->SetNumberField(TEXT("pin_count"), GraphPinCount);
+			GraphObject->SetNumberField(TEXT("link_count"), GraphLinkCount);
 			GraphObject->SetArrayField(TEXT("nodes"), NodeValues);
+			OutTotalNodeCount += Graph->Nodes.Num();
+			OutTotalPinCount += GraphPinCount;
+			OutTotalLinkCount += GraphLinkCount;
 			OutGraphValues.Add(MakeShared<FJsonValueObject>(GraphObject));
 			if (OutGraphValues.Num() >= 64)
 			{
@@ -259,6 +394,7 @@ namespace UEAgentEditorToolServerPrivate
 		}
 
 		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
+		SnapshotObject->SetStringField(TEXT("graph_schema_version"), TEXT("blueprint_graph_snapshot_v2"));
 		SnapshotObject->SetStringField(TEXT("blueprint_path"), NormalizedPath);
 		SnapshotObject->SetStringField(TEXT("blueprint_name"), Blueprint->GetName());
 		SnapshotObject->SetStringField(TEXT("status"), BlueprintStatusToString(Blueprint->Status));
@@ -270,11 +406,24 @@ namespace UEAgentEditorToolServerPrivate
 		}
 
 		TArray<TSharedPtr<FJsonValue>> GraphValues;
+		int32 TotalNodeCount = 0;
+		int32 TotalPinCount = 0;
+		int32 TotalLinkCount = 0;
 #if WITH_EDITORONLY_DATA
-		AddGraphSummaries(Blueprint->UbergraphPages, TEXT("event"), GraphValues);
-		AddGraphSummaries(Blueprint->FunctionGraphs, TEXT("function"), GraphValues);
-		AddGraphSummaries(Blueprint->MacroGraphs, TEXT("macro"), GraphValues);
+		AddGraphSummaries(Blueprint->UbergraphPages, TEXT("event"), GraphValues, TotalNodeCount, TotalPinCount, TotalLinkCount);
+		AddGraphSummaries(Blueprint->FunctionGraphs, TEXT("function"), GraphValues, TotalNodeCount, TotalPinCount, TotalLinkCount);
+		AddGraphSummaries(Blueprint->MacroGraphs, TEXT("macro"), GraphValues, TotalNodeCount, TotalPinCount, TotalLinkCount);
 #endif
+		TSharedPtr<FJsonObject> GraphMetricsObject = MakeShared<FJsonObject>();
+		GraphMetricsObject->SetNumberField(TEXT("graph_count"), GraphValues.Num());
+		GraphMetricsObject->SetNumberField(TEXT("node_count"), TotalNodeCount);
+		GraphMetricsObject->SetNumberField(TEXT("pin_count"), TotalPinCount);
+		GraphMetricsObject->SetNumberField(TEXT("link_count"), TotalLinkCount);
+		GraphMetricsObject->SetNumberField(TEXT("max_graphs_returned"), 64);
+		GraphMetricsObject->SetNumberField(TEXT("max_nodes_per_graph"), 64);
+		GraphMetricsObject->SetNumberField(TEXT("max_pins_per_node"), 32);
+		GraphMetricsObject->SetNumberField(TEXT("max_links_per_pin"), 8);
+		SnapshotObject->SetObjectField(TEXT("graph_metrics"), GraphMetricsObject);
 		SnapshotObject->SetArrayField(TEXT("graphs"), GraphValues);
 
 		TArray<TSharedPtr<FJsonValue>> VariableValues;
