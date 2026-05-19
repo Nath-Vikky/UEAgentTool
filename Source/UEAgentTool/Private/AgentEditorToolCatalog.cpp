@@ -86,6 +86,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("blueprint_path"), TEXT("event_name") },
 		{ TEXT("graph_name"), TEXT("node_comment") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("add_blueprint_node_template")),
+		TEXT("add_blueprint_node_template"),
+		TEXT("Add one whitelisted Blueprint node template after backend Proposal confirmation."),
+		TEXT("blueprint"),
+		{ TEXT("blueprint_path"), TEXT("template_id") },
+		{ TEXT("graph_name"), TEXT("message"), TEXT("duration"), TEXT("print_to_screen"), TEXT("print_to_log"), TEXT("entry_event"), TEXT("node_position"), TEXT("node_comment"), TEXT("compile_after_edit") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("compile_blueprint")),
 		TEXT("compile_blueprint"),
 		TEXT("Compile one Blueprint after backend Proposal confirmation."),

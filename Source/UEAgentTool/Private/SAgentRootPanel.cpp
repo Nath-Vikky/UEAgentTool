@@ -43,7 +43,9 @@
 #include "HAL/PlatformApplicationMisc.h"
 #include "HAL/PlatformProcess.h"
 #include "IAssetTools.h"
+#include "K2Node_CallFunction.h"
 #include "K2Node_Event.h"
+#include "Kismet/KismetSystemLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Materials/MaterialInstanceConstant.h"
@@ -1650,6 +1652,265 @@ namespace UEAgentRootPanelPrivate
 		return ExecutionResult;
 	}
 
+	static FEditorOperationExecutionResult ExecuteAddBlueprintNodeTemplate(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("UK2Node_CallFunction"));
+
+		const FString BlueprintPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("blueprint_path")));
+		const FString TemplateId = GetScalarFieldAsString(PayloadObject, TEXT("template_id")).TrimStartAndEnd().ToLower();
+		FString GraphName = GetScalarFieldAsString(PayloadObject, TEXT("graph_name")).TrimStartAndEnd();
+		const FString Message = GetScalarFieldAsString(PayloadObject, TEXT("message"));
+		const FString NodeComment = GetScalarFieldAsString(PayloadObject, TEXT("node_comment"));
+		const FString EntryEventName = GetScalarFieldAsString(PayloadObject, TEXT("entry_event")).TrimStartAndEnd();
+		const bool bPrintToScreen = GetBoolFieldOrDefault(PayloadObject, TEXT("print_to_screen"), true);
+		const bool bPrintToLog = GetBoolFieldOrDefault(PayloadObject, TEXT("print_to_log"), true);
+		const bool bCompileAfterEdit = GetBoolFieldOrDefault(PayloadObject, TEXT("compile_after_edit"), true);
+		double DurationSeconds = 2.0;
+		PayloadObject->TryGetNumberField(TEXT("duration"), DurationSeconds);
+		if (GraphName.IsEmpty())
+		{
+			GraphName = TEXT("EventGraph");
+		}
+		if (BlueprintPath.IsEmpty() || TemplateId.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("blueprint_path and template_id are required."));
+			return ExecutionResult;
+		}
+		if (!TemplateId.Equals(TEXT("print_string"), ESearchCase::IgnoreCase))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string is supported in v1."));
+			return ExecutionResult;
+		}
+
+		UBlueprint* Blueprint = LoadBlueprintAsset(BlueprintPath);
+		if (Blueprint == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_not_found"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Add Blueprint Node Template")));
+		Blueprint->Modify();
+
+		UEdGraph* TargetGraph = nullptr;
+#if WITH_EDITORONLY_DATA
+		for (UEdGraph* Graph : Blueprint->UbergraphPages)
+		{
+			if (Graph != nullptr && Graph->GetName().Equals(GraphName, ESearchCase::IgnoreCase))
+			{
+				TargetGraph = Graph;
+				break;
+			}
+		}
+#endif
+		if (TargetGraph == nullptr)
+		{
+			TargetGraph = FBlueprintEditorUtils::FindEventGraph(Blueprint);
+		}
+		if (TargetGraph == nullptr)
+		{
+			TargetGraph = FBlueprintEditorUtils::CreateNewGraph(Blueprint, FName(*GraphName), UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+			if (TargetGraph != nullptr)
+			{
+				FBlueprintEditorUtils::AddUbergraphPage(Blueprint, TargetGraph);
+			}
+		}
+		if (TargetGraph == nullptr)
+		{
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_graph_unavailable"), GraphName);
+			return ExecutionResult;
+		}
+
+		FVector2D NodePosition = TargetGraph->GetGoodPlaceForNewNode();
+		TSharedPtr<FJsonObject> NodePositionObject = GetObjectField(PayloadObject, TEXT("node_position"));
+		double PositionX = 0.0;
+		double PositionY = 0.0;
+		if (NodePositionObject.IsValid()
+			&& (TryGetNumberComponent(NodePositionObject, TEXT("x"), PositionX) || TryGetNumberComponent(NodePositionObject, TEXT("X"), PositionX))
+			&& (TryGetNumberComponent(NodePositionObject, TEXT("y"), PositionY) || TryGetNumberComponent(NodePositionObject, TEXT("Y"), PositionY)))
+		{
+			NodePosition = FVector2D(PositionX, PositionY);
+		}
+
+		UK2Node_Event* EntryEventNode = nullptr;
+		bool bCreatedEntryEvent = false;
+		if (!EntryEventName.IsEmpty())
+		{
+			FName EntryFunctionName;
+			UClass* EntryOwnerClass = nullptr;
+			if (!ResolveBlueprintEventFunction(EntryEventName, EntryFunctionName, EntryOwnerClass)
+				|| EntryOwnerClass == nullptr
+				|| EntryOwnerClass->FindFunctionByName(EntryFunctionName) == nullptr)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("entry_event_unsupported"), TEXT("Only BeginPlay is supported for print_string template links in v1."));
+				return ExecutionResult;
+			}
+
+			EntryEventNode = FBlueprintEditorUtils::FindOverrideForFunction(Blueprint, EntryOwnerClass, EntryFunctionName);
+			if (EntryEventNode != nullptr && EntryEventNode->GetGraph() != nullptr)
+			{
+				TargetGraph = EntryEventNode->GetGraph();
+			}
+			if (EntryEventNode == nullptr)
+			{
+				TargetGraph->Modify();
+				EntryEventNode = NewObject<UK2Node_Event>(TargetGraph);
+				EntryEventNode->SetFlags(RF_Transactional);
+				EntryEventNode->EventReference.SetExternalMember(EntryFunctionName, EntryOwnerClass);
+				EntryEventNode->bOverrideFunction = true;
+				EntryEventNode->CreateNewGuid();
+				EntryEventNode->PostPlacedNewNode();
+				EntryEventNode->AllocateDefaultPins();
+				EntryEventNode->NodePosX = static_cast<int32>(NodePosition.X - 320.0);
+				EntryEventNode->NodePosY = static_cast<int32>(NodePosition.Y);
+				TargetGraph->AddNode(EntryEventNode, true, true);
+				bCreatedEntryEvent = true;
+			}
+		}
+
+		TargetGraph->Modify();
+		UK2Node_CallFunction* CallNode = NewObject<UK2Node_CallFunction>(TargetGraph);
+		CallNode->SetFlags(RF_Transactional);
+		CallNode->FunctionReference.SetExternalMember(
+			GET_FUNCTION_NAME_CHECKED(UKismetSystemLibrary, PrintString),
+			UKismetSystemLibrary::StaticClass());
+		CallNode->CreateNewGuid();
+		CallNode->PostPlacedNewNode();
+		CallNode->AllocateDefaultPins();
+
+		CallNode->NodePosX = static_cast<int32>(NodePosition.X);
+		CallNode->NodePosY = static_cast<int32>(NodePosition.Y);
+		if (!NodeComment.IsEmpty())
+		{
+			CallNode->NodeComment = NodeComment;
+			CallNode->bCommentBubblePinned = true;
+			CallNode->bCommentBubbleVisible = true;
+		}
+
+		if (UEdGraphPin* InStringPin = CallNode->FindPin(TEXT("InString")))
+		{
+			InStringPin->DefaultValue = Message.IsEmpty() ? TEXT("Hello from UEAgent") : Message;
+		}
+		if (UEdGraphPin* PrintToScreenPin = CallNode->FindPin(TEXT("bPrintToScreen")))
+		{
+			PrintToScreenPin->DefaultValue = bPrintToScreen ? TEXT("true") : TEXT("false");
+		}
+		if (UEdGraphPin* PrintToLogPin = CallNode->FindPin(TEXT("bPrintToLog")))
+		{
+			PrintToLogPin->DefaultValue = bPrintToLog ? TEXT("true") : TEXT("false");
+		}
+		if (UEdGraphPin* DurationPin = CallNode->FindPin(TEXT("Duration")))
+		{
+			DurationPin->DefaultValue = FString::SanitizeFloat(DurationSeconds);
+		}
+
+		TargetGraph->AddNode(CallNode, true, true);
+		bool bTemplateLinkSuccess = EntryEventName.IsEmpty();
+		FString LinkedPinsSummary;
+		if (EntryEventNode != nullptr)
+		{
+			UEdGraphPin* SourceExecPin = EntryEventNode->FindPin(UEdGraphSchema_K2::PN_Then);
+			if (SourceExecPin == nullptr)
+			{
+				for (UEdGraphPin* Pin : EntryEventNode->Pins)
+				{
+					if (Pin != nullptr && Pin->Direction == EGPD_Output && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+					{
+						SourceExecPin = Pin;
+						break;
+					}
+				}
+			}
+
+			UEdGraphPin* TargetExecPin = CallNode->FindPin(UEdGraphSchema_K2::PN_Execute);
+			if (TargetExecPin == nullptr)
+			{
+				for (UEdGraphPin* Pin : CallNode->Pins)
+				{
+					if (Pin != nullptr && Pin->Direction == EGPD_Input && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+					{
+						TargetExecPin = Pin;
+						break;
+					}
+				}
+			}
+
+			if (SourceExecPin != nullptr && TargetExecPin != nullptr)
+			{
+				if (SourceExecPin->LinkedTo.Contains(TargetExecPin))
+				{
+					bTemplateLinkSuccess = true;
+				}
+				else if (const UEdGraphSchema* Schema = TargetGraph->GetSchema())
+				{
+					bTemplateLinkSuccess = Schema->TryCreateConnection(SourceExecPin, TargetExecPin);
+				}
+				LinkedPinsSummary = FString::Printf(TEXT("%s.%s -> %s.%s"),
+					*EntryEventNode->GetName(),
+					*SourceExecPin->PinName.ToString(),
+					*CallNode->GetName(),
+					*TargetExecPin->PinName.ToString());
+			}
+
+			if (!bTemplateLinkSuccess)
+			{
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay exec output to PrintString exec input."));
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay.Then -> PrintString.Execute failed."));
+			}
+		}
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		FString CompileStatus = BlueprintStatusToOperationString(Blueprint->Status);
+		bool bCompileSuccess = true;
+		if (bCompileAfterEdit)
+		{
+			FKismetEditorUtilities::CompileBlueprint(Blueprint);
+			CompileStatus = BlueprintStatusToOperationString(Blueprint->Status);
+			bCompileSuccess = Blueprint->Status != BS_Error;
+		}
+
+		ExecutionResult.bSuccess = bCompileSuccess && bTemplateLinkSuccess;
+		ExecutionResult.ExecutionState = ExecutionResult.bSuccess ? TEXT("completed") : TEXT("failed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to remove the created Blueprint node. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("blueprint_path"), BlueprintPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("template_id"), TEXT("print_string"));
+		ExecutionResult.ResultObject->SetStringField(TEXT("graph_name"), TargetGraph->GetName());
+		ExecutionResult.ResultObject->SetStringField(TEXT("created_node_name"), CallNode->GetName());
+		ExecutionResult.ResultObject->SetStringField(TEXT("compile_status"), CompileStatus);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("compiled_after_edit"), bCompileAfterEdit);
+		ExecutionResult.ResultObject->SetBoolField(TEXT("linked_entry_event"), bTemplateLinkSuccess && !EntryEventName.IsEmpty());
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), Blueprint->GetOutermost() != nullptr && Blueprint->GetOutermost()->IsDirty());
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), CallNode->GetName());
+		if (bCreatedEntryEvent && EntryEventNode != nullptr)
+		{
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), EntryEventNode->GetName());
+		}
+		if (EntryEventNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("entry_event"), EntryEventName);
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), EntryEventNode->GetName());
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), CallNode->GetName());
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_pins"), LinkedPinsSummary);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("entry_event"), EntryEventName);
+		}
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), Blueprint->GetOutermost() != nullptr ? Blueprint->GetOutermost()->GetName() : FString());
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("template_id"), TEXT("print_string"));
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("message"), Message.IsEmpty() ? TEXT("Hello from UEAgent") : Message);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("graph_name"), TargetGraph->GetName());
+		if (!bCompileSuccess)
+		{
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_compile_failed"), FString::Printf(TEXT("Blueprint compile status: %s"), *CompileStatus));
+		}
+		return ExecutionResult;
+	}
+
 	static FEditorOperationExecutionResult ExecuteCompileBlueprint(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -2509,6 +2770,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("create_blueprint_event_stub"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteCreateBlueprintEventStub);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("add_blueprint_node_template"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteAddBlueprintNodeTemplate);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("compile_blueprint"), ESearchCase::IgnoreCase))
