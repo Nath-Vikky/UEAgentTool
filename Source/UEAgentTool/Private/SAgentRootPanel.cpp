@@ -45,6 +45,7 @@
 #include "IAssetTools.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_Event.h"
+#include "K2Node_IfThenElse.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -1663,9 +1664,13 @@ namespace UEAgentRootPanelPrivate
 		const FString Message = GetScalarFieldAsString(PayloadObject, TEXT("message"));
 		const FString NodeComment = GetScalarFieldAsString(PayloadObject, TEXT("node_comment"));
 		const FString EntryEventName = GetScalarFieldAsString(PayloadObject, TEXT("entry_event")).TrimStartAndEnd();
+		FString BranchPath = GetScalarFieldAsString(PayloadObject, TEXT("branch_path")).TrimStartAndEnd().ToLower();
+		const bool bConditionDefault = GetBoolFieldOrDefault(PayloadObject, TEXT("condition_default"), true);
 		const bool bPrintToScreen = GetBoolFieldOrDefault(PayloadObject, TEXT("print_to_screen"), true);
 		const bool bPrintToLog = GetBoolFieldOrDefault(PayloadObject, TEXT("print_to_log"), true);
 		const bool bCompileAfterEdit = GetBoolFieldOrDefault(PayloadObject, TEXT("compile_after_edit"), true);
+		const bool bIsPrintStringTemplate = TemplateId.Equals(TEXT("print_string"), ESearchCase::IgnoreCase);
+		const bool bIsBranchPrintStringTemplate = TemplateId.Equals(TEXT("branch_print_string"), ESearchCase::IgnoreCase);
 		double DurationSeconds = 2.0;
 		PayloadObject->TryGetNumberField(TEXT("duration"), DurationSeconds);
 		if (GraphName.IsEmpty())
@@ -1678,10 +1683,20 @@ namespace UEAgentRootPanelPrivate
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("blueprint_path and template_id are required."));
 			return ExecutionResult;
 		}
-		if (!TemplateId.Equals(TEXT("print_string"), ESearchCase::IgnoreCase))
+		if (!bIsPrintStringTemplate && !bIsBranchPrintStringTemplate)
 		{
 			ExecutionResult.ExecutionState = TEXT("blocked");
-			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string is supported in v1."));
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string and branch_print_string are supported in v1."));
+			return ExecutionResult;
+		}
+		if (BranchPath.IsEmpty())
+		{
+			BranchPath = TEXT("true");
+		}
+		if (bIsBranchPrintStringTemplate && !BranchPath.Equals(TEXT("true"), ESearchCase::IgnoreCase) && !BranchPath.Equals(TEXT("false"), ESearchCase::IgnoreCase))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("branch_path_unsupported"), TEXT("branch_path must be true or false."));
 			return ExecutionResult;
 		}
 
@@ -1747,7 +1762,7 @@ namespace UEAgentRootPanelPrivate
 				|| EntryOwnerClass->FindFunctionByName(EntryFunctionName) == nullptr)
 			{
 				ExecutionResult.ExecutionState = TEXT("blocked");
-				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("entry_event_unsupported"), TEXT("Only BeginPlay is supported for print_string template links in v1."));
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("entry_event_unsupported"), TEXT("Only BeginPlay is supported for Blueprint node template links in v1."));
 				return ExecutionResult;
 			}
 
@@ -1774,6 +1789,29 @@ namespace UEAgentRootPanelPrivate
 		}
 
 		TargetGraph->Modify();
+		UK2Node_IfThenElse* BranchNode = nullptr;
+		if (bIsBranchPrintStringTemplate)
+		{
+			BranchNode = NewObject<UK2Node_IfThenElse>(TargetGraph);
+			BranchNode->SetFlags(RF_Transactional);
+			BranchNode->CreateNewGuid();
+			BranchNode->PostPlacedNewNode();
+			BranchNode->AllocateDefaultPins();
+			BranchNode->NodePosX = static_cast<int32>(NodePosition.X);
+			BranchNode->NodePosY = static_cast<int32>(NodePosition.Y);
+			if (!NodeComment.IsEmpty())
+			{
+				BranchNode->NodeComment = NodeComment;
+				BranchNode->bCommentBubblePinned = true;
+				BranchNode->bCommentBubbleVisible = true;
+			}
+			if (UEdGraphPin* ConditionPin = BranchNode->GetConditionPin())
+			{
+				ConditionPin->DefaultValue = bConditionDefault ? TEXT("true") : TEXT("false");
+			}
+			TargetGraph->AddNode(BranchNode, true, true);
+		}
+
 		UK2Node_CallFunction* CallNode = NewObject<UK2Node_CallFunction>(TargetGraph);
 		CallNode->SetFlags(RF_Transactional);
 		CallNode->FunctionReference.SetExternalMember(
@@ -1783,7 +1821,7 @@ namespace UEAgentRootPanelPrivate
 		CallNode->PostPlacedNewNode();
 		CallNode->AllocateDefaultPins();
 
-		CallNode->NodePosX = static_cast<int32>(NodePosition.X);
+		CallNode->NodePosX = static_cast<int32>(bIsBranchPrintStringTemplate ? NodePosition.X + 360.0 : NodePosition.X);
 		CallNode->NodePosY = static_cast<int32>(NodePosition.Y);
 		if (!NodeComment.IsEmpty())
 		{
@@ -1810,53 +1848,85 @@ namespace UEAgentRootPanelPrivate
 		}
 
 		TargetGraph->AddNode(CallNode, true, true);
-		bool bTemplateLinkSuccess = EntryEventName.IsEmpty();
-		FString LinkedPinsSummary;
-		if (EntryEventNode != nullptr)
+		TArray<FString> LinkedPinsSummaries;
+		auto FindExecPin = [](UEdGraphNode* Node, const EEdGraphPinDirection Direction, const FName PreferredName) -> UEdGraphPin*
 		{
-			UEdGraphPin* SourceExecPin = EntryEventNode->FindPin(UEdGraphSchema_K2::PN_Then);
-			if (SourceExecPin == nullptr)
+			if (Node == nullptr)
 			{
-				for (UEdGraphPin* Pin : EntryEventNode->Pins)
+				return nullptr;
+			}
+			if (!PreferredName.IsNone())
+			{
+				if (UEdGraphPin* PreferredPin = Node->FindPin(PreferredName))
 				{
-					if (Pin != nullptr && Pin->Direction == EGPD_Output && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
-					{
-						SourceExecPin = Pin;
-						break;
-					}
+					return PreferredPin;
 				}
 			}
-
-			UEdGraphPin* TargetExecPin = CallNode->FindPin(UEdGraphSchema_K2::PN_Execute);
-			if (TargetExecPin == nullptr)
+			for (UEdGraphPin* Pin : Node->Pins)
 			{
-				for (UEdGraphPin* Pin : CallNode->Pins)
+				if (Pin != nullptr && Pin->Direction == Direction && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
 				{
-					if (Pin != nullptr && Pin->Direction == EGPD_Input && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
-					{
-						TargetExecPin = Pin;
-						break;
-					}
+					return Pin;
 				}
 			}
-
-			if (SourceExecPin != nullptr && TargetExecPin != nullptr)
+			return nullptr;
+		};
+		auto ConnectExecPins = [&TargetGraph, &LinkedPinsSummaries](UEdGraphNode* SourceNode, UEdGraphPin* SourcePin, UEdGraphNode* TargetNode, UEdGraphPin* TargetPin) -> bool
+		{
+			if (SourceNode == nullptr || SourcePin == nullptr || TargetNode == nullptr || TargetPin == nullptr)
 			{
-				if (SourceExecPin->LinkedTo.Contains(TargetExecPin))
-				{
-					bTemplateLinkSuccess = true;
-				}
-				else if (const UEdGraphSchema* Schema = TargetGraph->GetSchema())
-				{
-					bTemplateLinkSuccess = Schema->TryCreateConnection(SourceExecPin, TargetExecPin);
-				}
-				LinkedPinsSummary = FString::Printf(TEXT("%s.%s -> %s.%s"),
-					*EntryEventNode->GetName(),
-					*SourceExecPin->PinName.ToString(),
-					*CallNode->GetName(),
-					*TargetExecPin->PinName.ToString());
+				return false;
 			}
+			bool bLinked = SourcePin->LinkedTo.Contains(TargetPin);
+			if (!bLinked && (SourcePin->LinkedTo.Num() > 0 || TargetPin->LinkedTo.Num() > 0))
+			{
+				return false;
+			}
+			if (!bLinked)
+			{
+				if (const UEdGraphSchema* Schema = TargetGraph != nullptr ? TargetGraph->GetSchema() : nullptr)
+				{
+					bLinked = Schema->TryCreateConnection(SourcePin, TargetPin);
+				}
+			}
+			if (bLinked)
+			{
+				LinkedPinsSummaries.Add(FString::Printf(TEXT("%s.%s -> %s.%s"),
+					*SourceNode->GetName(),
+					*SourcePin->PinName.ToString(),
+					*TargetNode->GetName(),
+					*TargetPin->PinName.ToString()));
+			}
+			return bLinked;
+		};
 
+		bool bTemplateLinkSuccess = EntryEventName.IsEmpty();
+		if (bIsBranchPrintStringTemplate)
+		{
+			UEdGraphPin* BranchInputPin = FindExecPin(BranchNode, EGPD_Input, UEdGraphSchema_K2::PN_Execute);
+			UEdGraphPin* BranchOutputPin = BranchPath.Equals(TEXT("false"), ESearchCase::IgnoreCase)
+				? (BranchNode != nullptr ? BranchNode->GetElsePin() : nullptr)
+				: (BranchNode != nullptr ? BranchNode->GetThenPin() : nullptr);
+			UEdGraphPin* PrintInputPin = FindExecPin(CallNode, EGPD_Input, UEdGraphSchema_K2::PN_Execute);
+			const bool bBranchToPrintLinked = ConnectExecPins(BranchNode, BranchOutputPin, CallNode, PrintInputPin);
+			bool bEntryToBranchLinked = EntryEventName.IsEmpty();
+			if (EntryEventNode != nullptr)
+			{
+				UEdGraphPin* EntryOutputPin = FindExecPin(EntryEventNode, EGPD_Output, UEdGraphSchema_K2::PN_Then);
+				bEntryToBranchLinked = ConnectExecPins(EntryEventNode, EntryOutputPin, BranchNode, BranchInputPin);
+			}
+			bTemplateLinkSuccess = bEntryToBranchLinked && bBranchToPrintLinked;
+			if (!bTemplateLinkSuccess)
+			{
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay -> Branch -> PrintString exec chain."));
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay -> Branch -> PrintString failed."));
+			}
+		}
+		else if (EntryEventNode != nullptr)
+		{
+			UEdGraphPin* SourceExecPin = FindExecPin(EntryEventNode, EGPD_Output, UEdGraphSchema_K2::PN_Then);
+			UEdGraphPin* TargetExecPin = FindExecPin(CallNode, EGPD_Input, UEdGraphSchema_K2::PN_Execute);
+			bTemplateLinkSuccess = ConnectExecPins(EntryEventNode, SourceExecPin, CallNode, TargetExecPin);
 			if (!bTemplateLinkSuccess)
 			{
 				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay exec output to PrintString exec input."));
@@ -1879,7 +1949,7 @@ namespace UEAgentRootPanelPrivate
 		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
 		ExecutionResult.UndoHint = TEXT("Use editor Undo to remove the created Blueprint node. The package is marked dirty but not auto-saved.");
 		ExecutionResult.ResultObject->SetStringField(TEXT("blueprint_path"), BlueprintPath);
-		ExecutionResult.ResultObject->SetStringField(TEXT("template_id"), TEXT("print_string"));
+		ExecutionResult.ResultObject->SetStringField(TEXT("template_id"), TemplateId);
 		ExecutionResult.ResultObject->SetStringField(TEXT("graph_name"), TargetGraph->GetName());
 		ExecutionResult.ResultObject->SetStringField(TEXT("created_node_name"), CallNode->GetName());
 		ExecutionResult.ResultObject->SetStringField(TEXT("compile_status"), CompileStatus);
@@ -1887,6 +1957,12 @@ namespace UEAgentRootPanelPrivate
 		ExecutionResult.ResultObject->SetBoolField(TEXT("compiled_after_edit"), bCompileAfterEdit);
 		ExecutionResult.ResultObject->SetBoolField(TEXT("linked_entry_event"), bTemplateLinkSuccess && !EntryEventName.IsEmpty());
 		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), Blueprint->GetOutermost() != nullptr && Blueprint->GetOutermost()->IsDirty());
+		if (BranchNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("branch_path"), BranchPath);
+			ExecutionResult.ResultObject->SetBoolField(TEXT("condition_default"), bConditionDefault);
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), BranchNode->GetName());
+		}
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), CallNode->GetName());
 		if (bCreatedEntryEvent && EntryEventNode != nullptr)
 		{
@@ -1896,14 +1972,29 @@ namespace UEAgentRootPanelPrivate
 		{
 			ExecutionResult.ResultObject->SetStringField(TEXT("entry_event"), EntryEventName);
 			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), EntryEventNode->GetName());
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), CallNode->GetName());
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_pins"), LinkedPinsSummary);
 			SetAppliedField(ExecutionResult.ResultObject, TEXT("entry_event"), EntryEventName);
 		}
+		if (BranchNode != nullptr)
+		{
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), BranchNode->GetName());
+		}
+		if (EntryEventNode != nullptr || BranchNode != nullptr)
+		{
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), CallNode->GetName());
+		}
+		for (const FString& LinkedPinsSummary : LinkedPinsSummaries)
+		{
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_pins"), LinkedPinsSummary);
+		}
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), Blueprint->GetOutermost() != nullptr ? Blueprint->GetOutermost()->GetName() : FString());
-		SetAppliedField(ExecutionResult.ResultObject, TEXT("template_id"), TEXT("print_string"));
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("template_id"), TemplateId);
 		SetAppliedField(ExecutionResult.ResultObject, TEXT("message"), Message.IsEmpty() ? TEXT("Hello from UEAgent") : Message);
 		SetAppliedField(ExecutionResult.ResultObject, TEXT("graph_name"), TargetGraph->GetName());
+		if (BranchNode != nullptr)
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("branch_path"), BranchPath);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("condition_default"), bConditionDefault ? TEXT("true") : TEXT("false"));
+		}
 		if (!bCompileSuccess)
 		{
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_compile_failed"), FString::Printf(TEXT("Blueprint compile status: %s"), *CompileStatus));
