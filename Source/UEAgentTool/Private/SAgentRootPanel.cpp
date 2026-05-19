@@ -47,6 +47,8 @@
 #include "K2Node_Event.h"
 #include "K2Node_ExecutionSequence.h"
 #include "K2Node_IfThenElse.h"
+#include "K2Node_VariableGet.h"
+#include "K2Node_VariableSet.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -62,6 +64,7 @@
 #include "Styling/AppStyle.h"
 #include "Templates/SubclassOf.h"
 #include "UObject/Class.h"
+#include "UObject/UnrealType.h"
 #include "WidgetBlueprint.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
@@ -1665,6 +1668,8 @@ namespace UEAgentRootPanelPrivate
 		const FString Message = GetScalarFieldAsString(PayloadObject, TEXT("message"));
 		const FString NodeComment = GetScalarFieldAsString(PayloadObject, TEXT("node_comment"));
 		const FString EntryEventName = GetScalarFieldAsString(PayloadObject, TEXT("entry_event")).TrimStartAndEnd();
+		const FString VariableName = GetScalarFieldAsString(PayloadObject, TEXT("variable_name")).TrimStartAndEnd();
+		const FString VariableValue = GetScalarFieldAsString(PayloadObject, TEXT("variable_value"));
 		FString BranchPath = GetScalarFieldAsString(PayloadObject, TEXT("branch_path")).TrimStartAndEnd().ToLower();
 		const bool bConditionDefault = GetBoolFieldOrDefault(PayloadObject, TEXT("condition_default"), true);
 		const bool bPrintToScreen = GetBoolFieldOrDefault(PayloadObject, TEXT("print_to_screen"), true);
@@ -1673,6 +1678,9 @@ namespace UEAgentRootPanelPrivate
 		const bool bIsPrintStringTemplate = TemplateId.Equals(TEXT("print_string"), ESearchCase::IgnoreCase);
 		const bool bIsBranchPrintStringTemplate = TemplateId.Equals(TEXT("branch_print_string"), ESearchCase::IgnoreCase);
 		const bool bIsSequencePrintStringsTemplate = TemplateId.Equals(TEXT("sequence_print_strings"), ESearchCase::IgnoreCase);
+		const bool bIsGetVariableTemplate = TemplateId.Equals(TEXT("get_variable"), ESearchCase::IgnoreCase);
+		const bool bIsSetVariableTemplate = TemplateId.Equals(TEXT("set_variable"), ESearchCase::IgnoreCase);
+		const bool bUsesPrintString = bIsPrintStringTemplate || bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate;
 		TArray<FString> SequenceMessages;
 		const TArray<TSharedPtr<FJsonValue>>* MessageValues = nullptr;
 		if (PayloadObject.IsValid() && PayloadObject->TryGetArrayField(TEXT("messages"), MessageValues) && MessageValues != nullptr)
@@ -1707,10 +1715,16 @@ namespace UEAgentRootPanelPrivate
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("blueprint_path and template_id are required."));
 			return ExecutionResult;
 		}
-		if (!bIsPrintStringTemplate && !bIsBranchPrintStringTemplate && !bIsSequencePrintStringsTemplate)
+		if (!bIsPrintStringTemplate && !bIsBranchPrintStringTemplate && !bIsSequencePrintStringsTemplate && !bIsGetVariableTemplate && !bIsSetVariableTemplate)
 		{
 			ExecutionResult.ExecutionState = TEXT("blocked");
-			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string, branch_print_string, and sequence_print_strings are supported in v1."));
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string, branch_print_string, sequence_print_strings, get_variable, and set_variable are supported in v1."));
+			return ExecutionResult;
+		}
+		if ((bIsGetVariableTemplate || bIsSetVariableTemplate) && VariableName.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("variable_name_required"), TEXT("variable_name is required for Blueprint variable node templates."));
 			return ExecutionResult;
 		}
 		if (BranchPath.IsEmpty())
@@ -1730,6 +1744,30 @@ namespace UEAgentRootPanelPrivate
 			ExecutionResult.ExecutionState = TEXT("blocked");
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_not_found"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
 			return ExecutionResult;
+		}
+		if (bIsGetVariableTemplate || bIsSetVariableTemplate)
+		{
+			const FName VariableFName(*VariableName);
+			bool bVariableExists = false;
+			for (const FBPVariableDescription& Variable : Blueprint->NewVariables)
+			{
+				if (Variable.VarName == VariableFName)
+				{
+					bVariableExists = true;
+					break;
+				}
+			}
+			UClass* SearchClass = Blueprint->SkeletonGeneratedClass != nullptr ? Blueprint->SkeletonGeneratedClass : Blueprint->GeneratedClass;
+			if (!bVariableExists && SearchClass != nullptr && FindFProperty<FProperty>(SearchClass, VariableFName) != nullptr)
+			{
+				bVariableExists = true;
+			}
+			if (!bVariableExists)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_variable_not_found"), FString::Printf(TEXT("Existing member variable not found: %s"), *VariableName));
+				return ExecutionResult;
+			}
 		}
 
 		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Add Blueprint Node Template")));
@@ -1854,44 +1892,105 @@ namespace UEAgentRootPanelPrivate
 			TargetGraph->AddNode(SequenceNode, true, true);
 		}
 
-		UK2Node_CallFunction* CallNode = NewObject<UK2Node_CallFunction>(TargetGraph);
-		CallNode->SetFlags(RF_Transactional);
-		CallNode->FunctionReference.SetExternalMember(
-			GET_FUNCTION_NAME_CHECKED(UKismetSystemLibrary, PrintString),
-			UKismetSystemLibrary::StaticClass());
-		CallNode->CreateNewGuid();
-		CallNode->PostPlacedNewNode();
-		CallNode->AllocateDefaultPins();
-
-		CallNode->NodePosX = static_cast<int32>((bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate) ? NodePosition.X + 360.0 : NodePosition.X);
-		CallNode->NodePosY = static_cast<int32>(NodePosition.Y);
-		if (!NodeComment.IsEmpty())
-		{
-			CallNode->NodeComment = NodeComment;
-			CallNode->bCommentBubblePinned = true;
-			CallNode->bCommentBubbleVisible = true;
-		}
-
-		if (UEdGraphPin* InStringPin = CallNode->FindPin(TEXT("InString")))
-		{
-			InStringPin->DefaultValue = bIsSequencePrintStringsTemplate ? SequenceMessages[0] : (Message.IsEmpty() ? TEXT("Hello from UEAgent") : Message);
-		}
-		if (UEdGraphPin* PrintToScreenPin = CallNode->FindPin(TEXT("bPrintToScreen")))
-		{
-			PrintToScreenPin->DefaultValue = bPrintToScreen ? TEXT("true") : TEXT("false");
-		}
-		if (UEdGraphPin* PrintToLogPin = CallNode->FindPin(TEXT("bPrintToLog")))
-		{
-			PrintToLogPin->DefaultValue = bPrintToLog ? TEXT("true") : TEXT("false");
-		}
-		if (UEdGraphPin* DurationPin = CallNode->FindPin(TEXT("Duration")))
-		{
-			DurationPin->DefaultValue = FString::SanitizeFloat(DurationSeconds);
-		}
-
-		TargetGraph->AddNode(CallNode, true, true);
 		TArray<UK2Node_CallFunction*> PrintNodes;
-		PrintNodes.Add(CallNode);
+		UK2Node_CallFunction* CallNode = nullptr;
+		UK2Node_VariableGet* VariableGetNode = nullptr;
+		UK2Node_VariableSet* VariableSetNode = nullptr;
+		if (bIsGetVariableTemplate)
+		{
+			VariableGetNode = NewObject<UK2Node_VariableGet>(TargetGraph);
+			VariableGetNode->SetFlags(RF_Transactional);
+			VariableGetNode->CreateNewGuid();
+			VariableGetNode->VariableReference.SetSelfMember(FName(*VariableName));
+			VariableGetNode->NodePosX = static_cast<int32>(NodePosition.X);
+			VariableGetNode->NodePosY = static_cast<int32>(NodePosition.Y);
+			if (!NodeComment.IsEmpty())
+			{
+				VariableGetNode->NodeComment = NodeComment;
+				VariableGetNode->bCommentBubblePinned = true;
+				VariableGetNode->bCommentBubbleVisible = true;
+			}
+			TargetGraph->AddNode(VariableGetNode, true, true);
+			VariableGetNode->PostPlacedNewNode();
+			VariableGetNode->AllocateDefaultPins();
+		}
+		if (bIsSetVariableTemplate)
+		{
+			VariableSetNode = NewObject<UK2Node_VariableSet>(TargetGraph);
+			VariableSetNode->SetFlags(RF_Transactional);
+			VariableSetNode->CreateNewGuid();
+			VariableSetNode->VariableReference.SetSelfMember(FName(*VariableName));
+			VariableSetNode->NodePosX = static_cast<int32>(NodePosition.X);
+			VariableSetNode->NodePosY = static_cast<int32>(NodePosition.Y);
+			if (!NodeComment.IsEmpty())
+			{
+				VariableSetNode->NodeComment = NodeComment;
+				VariableSetNode->bCommentBubblePinned = true;
+				VariableSetNode->bCommentBubbleVisible = true;
+			}
+			TargetGraph->AddNode(VariableSetNode, true, true);
+			VariableSetNode->PostPlacedNewNode();
+			VariableSetNode->AllocateDefaultPins();
+			if (!VariableValue.IsEmpty())
+			{
+				UEdGraphPin* VariableValuePin = VariableSetNode->FindPin(FName(*VariableName));
+				if (VariableValuePin == nullptr)
+				{
+					for (UEdGraphPin* Pin : VariableSetNode->Pins)
+					{
+						if (Pin != nullptr && Pin->Direction == EGPD_Input && Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec)
+						{
+							VariableValuePin = Pin;
+							break;
+						}
+					}
+				}
+				if (VariableValuePin != nullptr)
+				{
+					VariableValuePin->DefaultValue = VariableValue;
+				}
+			}
+		}
+		if (bUsesPrintString)
+		{
+			CallNode = NewObject<UK2Node_CallFunction>(TargetGraph);
+			CallNode->SetFlags(RF_Transactional);
+			CallNode->FunctionReference.SetExternalMember(
+				GET_FUNCTION_NAME_CHECKED(UKismetSystemLibrary, PrintString),
+				UKismetSystemLibrary::StaticClass());
+			CallNode->CreateNewGuid();
+			CallNode->PostPlacedNewNode();
+			CallNode->AllocateDefaultPins();
+
+			CallNode->NodePosX = static_cast<int32>((bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate) ? NodePosition.X + 360.0 : NodePosition.X);
+			CallNode->NodePosY = static_cast<int32>(NodePosition.Y);
+			if (!NodeComment.IsEmpty())
+			{
+				CallNode->NodeComment = NodeComment;
+				CallNode->bCommentBubblePinned = true;
+				CallNode->bCommentBubbleVisible = true;
+			}
+
+			if (UEdGraphPin* InStringPin = CallNode->FindPin(TEXT("InString")))
+			{
+				InStringPin->DefaultValue = bIsSequencePrintStringsTemplate ? SequenceMessages[0] : (Message.IsEmpty() ? TEXT("Hello from UEAgent") : Message);
+			}
+			if (UEdGraphPin* PrintToScreenPin = CallNode->FindPin(TEXT("bPrintToScreen")))
+			{
+				PrintToScreenPin->DefaultValue = bPrintToScreen ? TEXT("true") : TEXT("false");
+			}
+			if (UEdGraphPin* PrintToLogPin = CallNode->FindPin(TEXT("bPrintToLog")))
+			{
+				PrintToLogPin->DefaultValue = bPrintToLog ? TEXT("true") : TEXT("false");
+			}
+			if (UEdGraphPin* DurationPin = CallNode->FindPin(TEXT("Duration")))
+			{
+				DurationPin->DefaultValue = FString::SanitizeFloat(DurationSeconds);
+			}
+
+			TargetGraph->AddNode(CallNode, true, true);
+			PrintNodes.Add(CallNode);
+		}
 		if (bIsSequencePrintStringsTemplate)
 		{
 			for (int32 MessageIndex = 1; MessageIndex < SequenceMessages.Num(); ++MessageIndex)
@@ -2023,7 +2122,7 @@ namespace UEAgentRootPanelPrivate
 				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay -> Sequence -> PrintString failed."));
 			}
 		}
-		else if (EntryEventNode != nullptr)
+		else if (bIsPrintStringTemplate && EntryEventNode != nullptr)
 		{
 			UEdGraphPin* SourceExecPin = FindExecPin(EntryEventNode, EGPD_Output, UEdGraphSchema_K2::PN_Then);
 			UEdGraphPin* TargetExecPin = FindExecPin(CallNode, EGPD_Input, UEdGraphSchema_K2::PN_Execute);
@@ -2032,6 +2131,17 @@ namespace UEAgentRootPanelPrivate
 			{
 				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay exec output to PrintString exec input."));
 				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay.Then -> PrintString.Execute failed."));
+			}
+		}
+		else if (bIsSetVariableTemplate && EntryEventNode != nullptr)
+		{
+			UEdGraphPin* SourceExecPin = FindExecPin(EntryEventNode, EGPD_Output, UEdGraphSchema_K2::PN_Then);
+			UEdGraphPin* TargetExecPin = FindExecPin(VariableSetNode, EGPD_Input, UEdGraphSchema_K2::PN_Execute);
+			bTemplateLinkSuccess = ConnectExecPins(EntryEventNode, SourceExecPin, VariableSetNode, TargetExecPin);
+			if (!bTemplateLinkSuccess)
+			{
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay exec output to Set Variable exec input."));
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay.Then -> SetVariable.Execute failed."));
 			}
 		}
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
@@ -2049,10 +2159,23 @@ namespace UEAgentRootPanelPrivate
 		ExecutionResult.ExecutionState = ExecutionResult.bSuccess ? TEXT("completed") : TEXT("failed");
 		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
 		ExecutionResult.UndoHint = TEXT("Use editor Undo to remove the created Blueprint node. The package is marked dirty but not auto-saved.");
+		FString PrimaryCreatedNodeName;
+		if (CallNode != nullptr)
+		{
+			PrimaryCreatedNodeName = CallNode->GetName();
+		}
+		else if (VariableSetNode != nullptr)
+		{
+			PrimaryCreatedNodeName = VariableSetNode->GetName();
+		}
+		else if (VariableGetNode != nullptr)
+		{
+			PrimaryCreatedNodeName = VariableGetNode->GetName();
+		}
 		ExecutionResult.ResultObject->SetStringField(TEXT("blueprint_path"), BlueprintPath);
 		ExecutionResult.ResultObject->SetStringField(TEXT("template_id"), TemplateId);
 		ExecutionResult.ResultObject->SetStringField(TEXT("graph_name"), TargetGraph->GetName());
-		ExecutionResult.ResultObject->SetStringField(TEXT("created_node_name"), CallNode->GetName());
+		ExecutionResult.ResultObject->SetStringField(TEXT("created_node_name"), PrimaryCreatedNodeName);
 		ExecutionResult.ResultObject->SetStringField(TEXT("compile_status"), CompileStatus);
 		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
 		ExecutionResult.ResultObject->SetBoolField(TEXT("compiled_after_edit"), bCompileAfterEdit);
@@ -2073,7 +2196,23 @@ namespace UEAgentRootPanelPrivate
 				AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("messages"), SequenceMessage);
 			}
 		}
-		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), CallNode->GetName());
+		if (VariableGetNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("variable_name"), VariableName);
+			ExecutionResult.ResultObject->SetStringField(TEXT("variable_scope"), TEXT("self"));
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), VariableGetNode->GetName());
+		}
+		if (VariableSetNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("variable_name"), VariableName);
+			ExecutionResult.ResultObject->SetStringField(TEXT("variable_scope"), TEXT("self"));
+			ExecutionResult.ResultObject->SetStringField(TEXT("variable_value"), VariableValue);
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), VariableSetNode->GetName());
+		}
+		if (CallNode != nullptr)
+		{
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), CallNode->GetName());
+		}
 		for (int32 NodeIndex = 1; NodeIndex < PrintNodes.Num(); ++NodeIndex)
 		{
 			if (PrintNodes[NodeIndex] != nullptr)
@@ -2099,6 +2238,10 @@ namespace UEAgentRootPanelPrivate
 		{
 			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), SequenceNode->GetName());
 		}
+		if (VariableSetNode != nullptr && EntryEventNode != nullptr)
+		{
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), VariableSetNode->GetName());
+		}
 		if (EntryEventNode != nullptr || BranchNode != nullptr || SequenceNode != nullptr)
 		{
 			for (UK2Node_CallFunction* PrintNode : PrintNodes)
@@ -2115,8 +2258,20 @@ namespace UEAgentRootPanelPrivate
 		}
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), Blueprint->GetOutermost() != nullptr ? Blueprint->GetOutermost()->GetName() : FString());
 		SetAppliedField(ExecutionResult.ResultObject, TEXT("template_id"), TemplateId);
-		SetAppliedField(ExecutionResult.ResultObject, TEXT("message"), Message.IsEmpty() ? TEXT("Hello from UEAgent") : Message);
+		if (bUsesPrintString)
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("message"), Message.IsEmpty() ? TEXT("Hello from UEAgent") : Message);
+		}
 		SetAppliedField(ExecutionResult.ResultObject, TEXT("graph_name"), TargetGraph->GetName());
+		if (VariableGetNode != nullptr || VariableSetNode != nullptr)
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("variable_name"), VariableName);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("variable_scope"), TEXT("self"));
+		}
+		if (VariableSetNode != nullptr && !VariableValue.IsEmpty())
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("variable_value"), VariableValue);
+		}
 		if (BranchNode != nullptr)
 		{
 			SetAppliedField(ExecutionResult.ResultObject, TEXT("branch_path"), BranchPath);
