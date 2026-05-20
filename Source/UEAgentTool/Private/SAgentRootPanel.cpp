@@ -43,7 +43,9 @@
 #include "HAL/PlatformApplicationMisc.h"
 #include "HAL/PlatformProcess.h"
 #include "IAssetTools.h"
+#include "InputAction.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_EnhancedInputAction.h"
 #include "K2Node_Event.h"
 #include "K2Node_ExecutionSequence.h"
 #include "K2Node_IfThenElse.h"
@@ -1671,6 +1673,7 @@ namespace UEAgentRootPanelPrivate
 		const FString VariableName = GetScalarFieldAsString(PayloadObject, TEXT("variable_name")).TrimStartAndEnd();
 		const FString VariableValue = GetScalarFieldAsString(PayloadObject, TEXT("variable_value"));
 		const FString FunctionName = GetScalarFieldAsString(PayloadObject, TEXT("function_name")).TrimStartAndEnd();
+		const FString InputActionPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("input_action_path")));
 		FString BranchPath = GetScalarFieldAsString(PayloadObject, TEXT("branch_path")).TrimStartAndEnd().ToLower();
 		const bool bConditionDefault = GetBoolFieldOrDefault(PayloadObject, TEXT("condition_default"), true);
 		const bool bPrintToScreen = GetBoolFieldOrDefault(PayloadObject, TEXT("print_to_screen"), true);
@@ -1682,6 +1685,7 @@ namespace UEAgentRootPanelPrivate
 		const bool bIsGetVariableTemplate = TemplateId.Equals(TEXT("get_variable"), ESearchCase::IgnoreCase);
 		const bool bIsSetVariableTemplate = TemplateId.Equals(TEXT("set_variable"), ESearchCase::IgnoreCase);
 		const bool bIsCallFunctionTemplate = TemplateId.Equals(TEXT("call_function"), ESearchCase::IgnoreCase);
+		const bool bIsEnhancedInputActionEventTemplate = TemplateId.Equals(TEXT("enhanced_input_action_event"), ESearchCase::IgnoreCase);
 		const bool bUsesPrintString = bIsPrintStringTemplate || bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate;
 		TArray<FString> SequenceMessages;
 		const TArray<TSharedPtr<FJsonValue>>* MessageValues = nullptr;
@@ -1717,10 +1721,10 @@ namespace UEAgentRootPanelPrivate
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("blueprint_path and template_id are required."));
 			return ExecutionResult;
 		}
-		if (!bIsPrintStringTemplate && !bIsBranchPrintStringTemplate && !bIsSequencePrintStringsTemplate && !bIsGetVariableTemplate && !bIsSetVariableTemplate && !bIsCallFunctionTemplate)
+		if (!bIsPrintStringTemplate && !bIsBranchPrintStringTemplate && !bIsSequencePrintStringsTemplate && !bIsGetVariableTemplate && !bIsSetVariableTemplate && !bIsCallFunctionTemplate && !bIsEnhancedInputActionEventTemplate)
 		{
 			ExecutionResult.ExecutionState = TEXT("blocked");
-			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string, branch_print_string, sequence_print_strings, get_variable, set_variable, and call_function are supported in v1."));
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string, branch_print_string, sequence_print_strings, get_variable, set_variable, call_function, and enhanced_input_action_event are supported in v1."));
 			return ExecutionResult;
 		}
 		if ((bIsGetVariableTemplate || bIsSetVariableTemplate) && VariableName.IsEmpty())
@@ -1733,6 +1737,12 @@ namespace UEAgentRootPanelPrivate
 		{
 			ExecutionResult.ExecutionState = TEXT("blocked");
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("function_name_required"), TEXT("function_name is required for Blueprint function call templates."));
+			return ExecutionResult;
+		}
+		if (bIsEnhancedInputActionEventTemplate && InputActionPath.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("input_action_path_required"), TEXT("input_action_path is required for Enhanced Input Action event templates."));
 			return ExecutionResult;
 		}
 		if (BranchPath.IsEmpty())
@@ -1752,6 +1762,17 @@ namespace UEAgentRootPanelPrivate
 			ExecutionResult.ExecutionState = TEXT("blocked");
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_not_found"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
 			return ExecutionResult;
+		}
+		UInputAction* InputAction = nullptr;
+		if (bIsEnhancedInputActionEventTemplate)
+		{
+			InputAction = Cast<UInputAction>(LoadEditorAsset(InputActionPath));
+			if (InputAction == nullptr)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("input_action_not_found"), FString::Printf(TEXT("Input Action not found: %s"), *InputActionPath));
+				return ExecutionResult;
+			}
 		}
 		UFunction* FunctionToCall = nullptr;
 		if (bIsCallFunctionTemplate)
@@ -1949,6 +1970,7 @@ namespace UEAgentRootPanelPrivate
 		TArray<UK2Node_CallFunction*> PrintNodes;
 		UK2Node_CallFunction* CallNode = nullptr;
 		UK2Node_CallFunction* FunctionCallNode = nullptr;
+		UK2Node_EnhancedInputAction* EnhancedInputActionNode = nullptr;
 		UK2Node_VariableGet* VariableGetNode = nullptr;
 		UK2Node_VariableSet* VariableSetNode = nullptr;
 		if (bIsGetVariableTemplate)
@@ -2023,6 +2045,30 @@ namespace UEAgentRootPanelPrivate
 			TargetGraph->AddNode(FunctionCallNode, true, true);
 			FunctionCallNode->PostPlacedNewNode();
 			FunctionCallNode->AllocateDefaultPins();
+		}
+		if (bIsEnhancedInputActionEventTemplate)
+		{
+			EnhancedInputActionNode = NewObject<UK2Node_EnhancedInputAction>(TargetGraph);
+			EnhancedInputActionNode->SetFlags(RF_Transactional);
+			EnhancedInputActionNode->CreateNewGuid();
+			EnhancedInputActionNode->InputAction = InputAction;
+			EnhancedInputActionNode->NodePosX = static_cast<int32>(NodePosition.X);
+			EnhancedInputActionNode->NodePosY = static_cast<int32>(NodePosition.Y);
+			if (!NodeComment.IsEmpty())
+			{
+				EnhancedInputActionNode->NodeComment = NodeComment;
+				EnhancedInputActionNode->bCommentBubblePinned = true;
+				EnhancedInputActionNode->bCommentBubbleVisible = true;
+			}
+			if (!EnhancedInputActionNode->IsCompatibleWithGraph(TargetGraph))
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("enhanced_input_node_incompatible_graph"), TEXT("Enhanced Input Action nodes must be placed in an input-event-capable Ubergraph, not Construction Script or a function graph."));
+				return ExecutionResult;
+			}
+			TargetGraph->AddNode(EnhancedInputActionNode, true, true);
+			EnhancedInputActionNode->PostPlacedNewNode();
+			EnhancedInputActionNode->AllocateDefaultPins();
 		}
 		if (bUsesPrintString)
 		{
@@ -2260,6 +2306,10 @@ namespace UEAgentRootPanelPrivate
 		{
 			PrimaryCreatedNodeName = FunctionCallNode->GetName();
 		}
+		else if (EnhancedInputActionNode != nullptr)
+		{
+			PrimaryCreatedNodeName = EnhancedInputActionNode->GetName();
+		}
 		ExecutionResult.ResultObject->SetStringField(TEXT("blueprint_path"), BlueprintPath);
 		ExecutionResult.ResultObject->SetStringField(TEXT("template_id"), TemplateId);
 		ExecutionResult.ResultObject->SetStringField(TEXT("graph_name"), TargetGraph->GetName());
@@ -2302,6 +2352,12 @@ namespace UEAgentRootPanelPrivate
 			ExecutionResult.ResultObject->SetStringField(TEXT("function_name"), FunctionName);
 			ExecutionResult.ResultObject->SetStringField(TEXT("function_target"), TEXT("self"));
 			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), FunctionCallNode->GetName());
+		}
+		if (EnhancedInputActionNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("input_action_path"), InputActionPath);
+			ExecutionResult.ResultObject->SetStringField(TEXT("input_action_name"), InputAction != nullptr ? InputAction->GetName() : FString());
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), EnhancedInputActionNode->GetName());
 		}
 		if (CallNode != nullptr)
 		{
@@ -2374,6 +2430,11 @@ namespace UEAgentRootPanelPrivate
 		{
 			SetAppliedField(ExecutionResult.ResultObject, TEXT("function_name"), FunctionName);
 			SetAppliedField(ExecutionResult.ResultObject, TEXT("function_target"), TEXT("self"));
+		}
+		if (EnhancedInputActionNode != nullptr)
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("input_action_path"), InputActionPath);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("input_action_name"), InputAction != nullptr ? InputAction->GetName() : FString());
 		}
 		if (BranchNode != nullptr)
 		{
