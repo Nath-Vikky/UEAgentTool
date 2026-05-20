@@ -1838,7 +1838,7 @@ namespace UEAgentRootPanelPrivate
 			}
 		}
 #endif
-		if (TargetGraph == nullptr)
+		if (TargetGraph == nullptr && GraphName.Equals(TEXT("EventGraph"), ESearchCase::IgnoreCase))
 		{
 			TargetGraph = FBlueprintEditorUtils::FindEventGraph(Blueprint);
 		}
@@ -2428,6 +2428,201 @@ namespace UEAgentRootPanelPrivate
 		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), Blueprint->GetOutermost() != nullptr && Blueprint->GetOutermost()->IsDirty());
 		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), Blueprint->GetOutermost() != nullptr ? Blueprint->GetOutermost()->GetName() : FString());
+		if (!bCompileSuccess)
+		{
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_compile_failed"), FString::Printf(TEXT("Blueprint compile status: %s"), *CompileStatus));
+		}
+		return ExecutionResult;
+	}
+
+	static FEditorOperationExecutionResult ExecuteConnectBlueprintNodes(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("UEdGraphSchema.TryCreateConnection"));
+
+		const FString BlueprintPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("blueprint_path")));
+		FString GraphName = GetScalarFieldAsString(PayloadObject, TEXT("graph_name")).TrimStartAndEnd();
+		const FString SourceNodeId = GetScalarFieldAsString(PayloadObject, TEXT("source_node_id")).TrimStartAndEnd();
+		const FString SourcePinName = GetScalarFieldAsString(PayloadObject, TEXT("source_pin_name")).TrimStartAndEnd();
+		const FString TargetNodeId = GetScalarFieldAsString(PayloadObject, TEXT("target_node_id")).TrimStartAndEnd();
+		const FString TargetPinName = GetScalarFieldAsString(PayloadObject, TEXT("target_pin_name")).TrimStartAndEnd();
+		const bool bCompileAfterEdit = GetBoolFieldOrDefault(PayloadObject, TEXT("compile_after_edit"), true);
+		if (GraphName.IsEmpty())
+		{
+			GraphName = TEXT("EventGraph");
+		}
+		if (BlueprintPath.IsEmpty() || SourceNodeId.IsEmpty() || SourcePinName.IsEmpty() || TargetNodeId.IsEmpty() || TargetPinName.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("blueprint_path, graph_name, source_node_id, source_pin_name, target_node_id and target_pin_name are required."));
+			return ExecutionResult;
+		}
+
+		UBlueprint* Blueprint = LoadBlueprintAsset(BlueprintPath);
+		if (Blueprint == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_not_found"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return ExecutionResult;
+		}
+
+		UEdGraph* TargetGraph = nullptr;
+#if WITH_EDITORONLY_DATA
+		for (UEdGraph* Graph : Blueprint->UbergraphPages)
+		{
+			if (Graph != nullptr && Graph->GetName().Equals(GraphName, ESearchCase::IgnoreCase))
+			{
+				TargetGraph = Graph;
+				break;
+			}
+		}
+#endif
+		if (TargetGraph == nullptr && GraphName.Equals(TEXT("EventGraph"), ESearchCase::IgnoreCase))
+		{
+			TargetGraph = FBlueprintEditorUtils::FindEventGraph(Blueprint);
+		}
+		if (TargetGraph == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_graph_unavailable"), GraphName);
+			return ExecutionResult;
+		}
+
+		auto MatchesNodeIdentifier = [](const UEdGraphNode* Node, const FString& NodeIdentifier) -> bool
+		{
+			if (Node == nullptr)
+			{
+				return false;
+			}
+			if (Node->GetName().Equals(NodeIdentifier, ESearchCase::IgnoreCase))
+			{
+				return true;
+			}
+			const FString GuidWithHyphens = Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens);
+			const FString GuidDigits = Node->NodeGuid.ToString(EGuidFormats::Digits);
+			return GuidWithHyphens.Equals(NodeIdentifier, ESearchCase::IgnoreCase)
+				|| GuidDigits.Equals(NodeIdentifier, ESearchCase::IgnoreCase);
+		};
+		auto FindNodeByIdentifier = [&TargetGraph, &MatchesNodeIdentifier](const FString& NodeIdentifier) -> UEdGraphNode*
+		{
+			if (TargetGraph == nullptr)
+			{
+				return nullptr;
+			}
+			for (UEdGraphNode* Node : TargetGraph->Nodes)
+			{
+				if (MatchesNodeIdentifier(Node, NodeIdentifier))
+				{
+					return Node;
+				}
+			}
+			return nullptr;
+		};
+		auto FindPinByName = [](UEdGraphNode* Node, const FString& PinName) -> UEdGraphPin*
+		{
+			if (Node == nullptr)
+			{
+				return nullptr;
+			}
+			if (UEdGraphPin* DirectPin = Node->FindPin(FName(*PinName)))
+			{
+				return DirectPin;
+			}
+			for (UEdGraphPin* Pin : Node->Pins)
+			{
+				if (Pin != nullptr && Pin->PinName.ToString().Equals(PinName, ESearchCase::IgnoreCase))
+				{
+					return Pin;
+				}
+			}
+			return nullptr;
+		};
+
+		UEdGraphNode* SourceNode = FindNodeByIdentifier(SourceNodeId);
+		UEdGraphNode* TargetNode = FindNodeByIdentifier(TargetNodeId);
+		if (SourceNode == nullptr || TargetNode == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_not_found"), TEXT("source_node_id or target_node_id was not found in the target graph."));
+			return ExecutionResult;
+		}
+		UEdGraphPin* SourcePin = FindPinByName(SourceNode, SourcePinName);
+		UEdGraphPin* TargetPin = FindPinByName(TargetNode, TargetPinName);
+		if (SourcePin == nullptr || TargetPin == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_pin_not_found"), TEXT("source_pin_name or target_pin_name was not found on the selected nodes."));
+			return ExecutionResult;
+		}
+		if (SourcePin->Direction != EGPD_Output || TargetPin->Direction != EGPD_Input)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_pin_direction_invalid"), TEXT("connect_blueprint_nodes requires Source Output -> Target Input."));
+			return ExecutionResult;
+		}
+
+		const bool bAlreadyLinked = SourcePin->LinkedTo.Contains(TargetPin);
+		if (!bAlreadyLinked && (SourcePin->LinkedTo.Num() > 0 || TargetPin->LinkedTo.Num() > 0))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_pin_already_linked"), TEXT("One of the selected pins is already linked; v1 will not break or rewrite existing links."));
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Connect Blueprint Nodes")));
+		Blueprint->Modify();
+		TargetGraph->Modify();
+
+		bool bLinked = bAlreadyLinked;
+		if (!bLinked)
+		{
+			if (const UEdGraphSchema* Schema = TargetGraph->GetSchema())
+			{
+				bLinked = Schema->TryCreateConnection(SourcePin, TargetPin);
+			}
+		}
+		if (!bLinked)
+		{
+			ExecutionResult.ExecutionState = TEXT("failed");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_pin_connection_failed"), TEXT("UE graph schema rejected the pin connection."));
+			return ExecutionResult;
+		}
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		FString CompileStatus = BlueprintStatusToOperationString(Blueprint->Status);
+		bool bCompileSuccess = true;
+		if (bCompileAfterEdit)
+		{
+			FKismetEditorUtilities::CompileBlueprint(Blueprint);
+			CompileStatus = BlueprintStatusToOperationString(Blueprint->Status);
+			bCompileSuccess = Blueprint->Status != BS_Error;
+		}
+
+		const FString LinkSummary = FString::Printf(TEXT("%s.%s -> %s.%s"),
+			*SourceNode->GetName(),
+			*SourcePin->PinName.ToString(),
+			*TargetNode->GetName(),
+			*TargetPin->PinName.ToString());
+		ExecutionResult.bSuccess = bCompileSuccess;
+		ExecutionResult.ExecutionState = bCompileSuccess ? TEXT("completed") : TEXT("failed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to remove the created Blueprint pin link. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("blueprint_path"), BlueprintPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("graph_name"), TargetGraph->GetName());
+		ExecutionResult.ResultObject->SetStringField(TEXT("source_node_id"), SourceNodeId);
+		ExecutionResult.ResultObject->SetStringField(TEXT("source_pin_name"), SourcePinName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("target_node_id"), TargetNodeId);
+		ExecutionResult.ResultObject->SetStringField(TEXT("target_pin_name"), TargetPinName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("compile_status"), CompileStatus);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("compiled_after_edit"), bCompileAfterEdit);
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), Blueprint->GetOutermost() != nullptr && Blueprint->GetOutermost()->IsDirty());
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), SourceNode->GetName());
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), TargetNode->GetName());
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_pins"), LinkSummary);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), Blueprint->GetOutermost() != nullptr ? Blueprint->GetOutermost()->GetName() : FString());
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("source_pin_name"), SourcePinName);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("target_pin_name"), TargetPinName);
 		if (!bCompileSuccess)
 		{
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_compile_failed"), FString::Printf(TEXT("Blueprint compile status: %s"), *CompileStatus));
@@ -3255,6 +3450,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("add_blueprint_node_template"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteAddBlueprintNodeTemplate);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("connect_blueprint_nodes"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteConnectBlueprintNodes);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("compile_blueprint"), ESearchCase::IgnoreCase))

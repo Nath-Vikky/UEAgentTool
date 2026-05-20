@@ -93,6 +93,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("blueprint_path"), TEXT("template_id") },
 		{ TEXT("graph_name"), TEXT("message"), TEXT("duration"), TEXT("print_to_screen"), TEXT("print_to_log"), TEXT("entry_event"), TEXT("node_position"), TEXT("node_comment"), TEXT("compile_after_edit") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("connect_blueprint_nodes")),
+		TEXT("connect_blueprint_nodes"),
+		TEXT("Connect two explicit Blueprint pins in one graph after backend Proposal confirmation."),
+		TEXT("blueprint"),
+		{ TEXT("blueprint_path"), TEXT("graph_name"), TEXT("source_node_id"), TEXT("source_pin_name"), TEXT("target_node_id"), TEXT("target_pin_name") },
+		{ TEXT("compile_after_edit"), TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("compile_blueprint")),
 		TEXT("compile_blueprint"),
 		TEXT("Compile one Blueprint after backend Proposal confirmation."),
