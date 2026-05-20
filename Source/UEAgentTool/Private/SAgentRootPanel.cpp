@@ -1670,6 +1670,7 @@ namespace UEAgentRootPanelPrivate
 		const FString EntryEventName = GetScalarFieldAsString(PayloadObject, TEXT("entry_event")).TrimStartAndEnd();
 		const FString VariableName = GetScalarFieldAsString(PayloadObject, TEXT("variable_name")).TrimStartAndEnd();
 		const FString VariableValue = GetScalarFieldAsString(PayloadObject, TEXT("variable_value"));
+		const FString FunctionName = GetScalarFieldAsString(PayloadObject, TEXT("function_name")).TrimStartAndEnd();
 		FString BranchPath = GetScalarFieldAsString(PayloadObject, TEXT("branch_path")).TrimStartAndEnd().ToLower();
 		const bool bConditionDefault = GetBoolFieldOrDefault(PayloadObject, TEXT("condition_default"), true);
 		const bool bPrintToScreen = GetBoolFieldOrDefault(PayloadObject, TEXT("print_to_screen"), true);
@@ -1680,6 +1681,7 @@ namespace UEAgentRootPanelPrivate
 		const bool bIsSequencePrintStringsTemplate = TemplateId.Equals(TEXT("sequence_print_strings"), ESearchCase::IgnoreCase);
 		const bool bIsGetVariableTemplate = TemplateId.Equals(TEXT("get_variable"), ESearchCase::IgnoreCase);
 		const bool bIsSetVariableTemplate = TemplateId.Equals(TEXT("set_variable"), ESearchCase::IgnoreCase);
+		const bool bIsCallFunctionTemplate = TemplateId.Equals(TEXT("call_function"), ESearchCase::IgnoreCase);
 		const bool bUsesPrintString = bIsPrintStringTemplate || bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate;
 		TArray<FString> SequenceMessages;
 		const TArray<TSharedPtr<FJsonValue>>* MessageValues = nullptr;
@@ -1715,16 +1717,22 @@ namespace UEAgentRootPanelPrivate
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("blueprint_path and template_id are required."));
 			return ExecutionResult;
 		}
-		if (!bIsPrintStringTemplate && !bIsBranchPrintStringTemplate && !bIsSequencePrintStringsTemplate && !bIsGetVariableTemplate && !bIsSetVariableTemplate)
+		if (!bIsPrintStringTemplate && !bIsBranchPrintStringTemplate && !bIsSequencePrintStringsTemplate && !bIsGetVariableTemplate && !bIsSetVariableTemplate && !bIsCallFunctionTemplate)
 		{
 			ExecutionResult.ExecutionState = TEXT("blocked");
-			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string, branch_print_string, sequence_print_strings, get_variable, and set_variable are supported in v1."));
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string, branch_print_string, sequence_print_strings, get_variable, set_variable, and call_function are supported in v1."));
 			return ExecutionResult;
 		}
 		if ((bIsGetVariableTemplate || bIsSetVariableTemplate) && VariableName.IsEmpty())
 		{
 			ExecutionResult.ExecutionState = TEXT("blocked");
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("variable_name_required"), TEXT("variable_name is required for Blueprint variable node templates."));
+			return ExecutionResult;
+		}
+		if (bIsCallFunctionTemplate && FunctionName.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("function_name_required"), TEXT("function_name is required for Blueprint function call templates."));
 			return ExecutionResult;
 		}
 		if (BranchPath.IsEmpty())
@@ -1744,6 +1752,52 @@ namespace UEAgentRootPanelPrivate
 			ExecutionResult.ExecutionState = TEXT("blocked");
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_not_found"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
 			return ExecutionResult;
+		}
+		UFunction* FunctionToCall = nullptr;
+		if (bIsCallFunctionTemplate)
+		{
+			const FName FunctionFName(*FunctionName);
+			UClass* SearchClass = Blueprint->SkeletonGeneratedClass != nullptr ? Blueprint->SkeletonGeneratedClass : Blueprint->GeneratedClass;
+			FunctionToCall = SearchClass != nullptr ? SearchClass->FindFunctionByName(FunctionFName) : nullptr;
+			if (FunctionToCall == nullptr && Blueprint->GeneratedClass != nullptr)
+			{
+				FunctionToCall = Blueprint->GeneratedClass->FindFunctionByName(FunctionFName);
+			}
+			if (FunctionToCall == nullptr && Blueprint->ParentClass != nullptr)
+			{
+				FunctionToCall = Blueprint->ParentClass->FindFunctionByName(FunctionFName);
+			}
+			if (FunctionToCall == nullptr)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_function_not_found"), FString::Printf(TEXT("Existing self function not found: %s"), *FunctionName));
+				return ExecutionResult;
+			}
+			if (FunctionToCall->HasAnyFunctionFlags(FUNC_BlueprintPure))
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("pure_function_not_supported_in_v1"), TEXT("call_function currently supports exec-callable functions only; Blueprint Pure functions have no exec pins."));
+				return ExecutionResult;
+			}
+			bool bHasInputParams = false;
+			for (TFieldIterator<FProperty> PropertyIt(FunctionToCall); PropertyIt; ++PropertyIt)
+			{
+				const FProperty* Property = *PropertyIt;
+				if (Property != nullptr
+					&& Property->HasAnyPropertyFlags(CPF_Parm)
+					&& !Property->HasAnyPropertyFlags(CPF_ReturnParm)
+					&& !Property->HasAnyPropertyFlags(CPF_OutParm))
+				{
+					bHasInputParams = true;
+					break;
+				}
+			}
+			if (bHasInputParams)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("function_inputs_not_supported_in_v1"), TEXT("call_function currently supports existing self functions without input parameters only."));
+				return ExecutionResult;
+			}
 		}
 		if (bIsGetVariableTemplate || bIsSetVariableTemplate)
 		{
@@ -1894,6 +1948,7 @@ namespace UEAgentRootPanelPrivate
 
 		TArray<UK2Node_CallFunction*> PrintNodes;
 		UK2Node_CallFunction* CallNode = nullptr;
+		UK2Node_CallFunction* FunctionCallNode = nullptr;
 		UK2Node_VariableGet* VariableGetNode = nullptr;
 		UK2Node_VariableSet* VariableSetNode = nullptr;
 		if (bIsGetVariableTemplate)
@@ -1950,6 +2005,24 @@ namespace UEAgentRootPanelPrivate
 					VariableValuePin->DefaultValue = VariableValue;
 				}
 			}
+		}
+		if (bIsCallFunctionTemplate)
+		{
+			FunctionCallNode = NewObject<UK2Node_CallFunction>(TargetGraph);
+			FunctionCallNode->SetFlags(RF_Transactional);
+			FunctionCallNode->CreateNewGuid();
+			FunctionCallNode->SetFromFunction(FunctionToCall);
+			FunctionCallNode->NodePosX = static_cast<int32>(NodePosition.X);
+			FunctionCallNode->NodePosY = static_cast<int32>(NodePosition.Y);
+			if (!NodeComment.IsEmpty())
+			{
+				FunctionCallNode->NodeComment = NodeComment;
+				FunctionCallNode->bCommentBubblePinned = true;
+				FunctionCallNode->bCommentBubbleVisible = true;
+			}
+			TargetGraph->AddNode(FunctionCallNode, true, true);
+			FunctionCallNode->PostPlacedNewNode();
+			FunctionCallNode->AllocateDefaultPins();
 		}
 		if (bUsesPrintString)
 		{
@@ -2144,6 +2217,17 @@ namespace UEAgentRootPanelPrivate
 				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay.Then -> SetVariable.Execute failed."));
 			}
 		}
+		else if (bIsCallFunctionTemplate && EntryEventNode != nullptr)
+		{
+			UEdGraphPin* SourceExecPin = FindExecPin(EntryEventNode, EGPD_Output, UEdGraphSchema_K2::PN_Then);
+			UEdGraphPin* TargetExecPin = FindExecPin(FunctionCallNode, EGPD_Input, UEdGraphSchema_K2::PN_Execute);
+			bTemplateLinkSuccess = ConnectExecPins(EntryEventNode, SourceExecPin, FunctionCallNode, TargetExecPin);
+			if (!bTemplateLinkSuccess)
+			{
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay exec output to CallFunction exec input."));
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay.Then -> CallFunction.Execute failed."));
+			}
+		}
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 
 		FString CompileStatus = BlueprintStatusToOperationString(Blueprint->Status);
@@ -2171,6 +2255,10 @@ namespace UEAgentRootPanelPrivate
 		else if (VariableGetNode != nullptr)
 		{
 			PrimaryCreatedNodeName = VariableGetNode->GetName();
+		}
+		else if (FunctionCallNode != nullptr)
+		{
+			PrimaryCreatedNodeName = FunctionCallNode->GetName();
 		}
 		ExecutionResult.ResultObject->SetStringField(TEXT("blueprint_path"), BlueprintPath);
 		ExecutionResult.ResultObject->SetStringField(TEXT("template_id"), TemplateId);
@@ -2209,6 +2297,12 @@ namespace UEAgentRootPanelPrivate
 			ExecutionResult.ResultObject->SetStringField(TEXT("variable_value"), VariableValue);
 			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), VariableSetNode->GetName());
 		}
+		if (FunctionCallNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("function_name"), FunctionName);
+			ExecutionResult.ResultObject->SetStringField(TEXT("function_target"), TEXT("self"));
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), FunctionCallNode->GetName());
+		}
 		if (CallNode != nullptr)
 		{
 			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), CallNode->GetName());
@@ -2242,6 +2336,10 @@ namespace UEAgentRootPanelPrivate
 		{
 			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), VariableSetNode->GetName());
 		}
+		if (FunctionCallNode != nullptr && EntryEventNode != nullptr)
+		{
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), FunctionCallNode->GetName());
+		}
 		if (EntryEventNode != nullptr || BranchNode != nullptr || SequenceNode != nullptr)
 		{
 			for (UK2Node_CallFunction* PrintNode : PrintNodes)
@@ -2271,6 +2369,11 @@ namespace UEAgentRootPanelPrivate
 		if (VariableSetNode != nullptr && !VariableValue.IsEmpty())
 		{
 			SetAppliedField(ExecutionResult.ResultObject, TEXT("variable_value"), VariableValue);
+		}
+		if (FunctionCallNode != nullptr)
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("function_name"), FunctionName);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("function_target"), TEXT("self"));
 		}
 		if (BranchNode != nullptr)
 		{
