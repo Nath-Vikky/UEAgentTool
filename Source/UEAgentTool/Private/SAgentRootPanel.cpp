@@ -3909,6 +3909,7 @@ void SAgentRootPanel::Construct(const FArguments& InArgs)
 	RefreshBootstrapData();
 	RefreshKnowledgeBaseStatus();
 	RefreshTaskData();
+	SubmitProjectInventorySnapshot(true);
 }
 
 void SAgentRootPanel::HandleStateChanged()
@@ -4708,22 +4709,51 @@ void SAgentRootPanel::ExecuteAndReportEditorOperation(const TSharedPtr<FUEAgentP
 		});
 }
 
-void SAgentRootPanel::SubmitProjectInventorySnapshot()
+void SAgentRootPanel::SubmitProjectInventorySnapshot(const bool bSilent)
 {
+	if (bSilent)
+	{
+		if (bAutoInventorySubmitted)
+		{
+			return;
+		}
+		bAutoInventorySubmitted = true;
+	}
+
 	RefreshEditorContext();
-	StateStore->SetBusy(true, TEXT("Collecting Project Inventory snapshot..."));
+	if (!bSilent)
+	{
+		StateStore->SetBusy(true, TEXT("Collecting Project Inventory snapshot..."));
+	}
 
 	const TSharedPtr<FJsonObject> SnapshotObject = ContextCollector->BuildProjectInventorySnapshot();
-	HttpClient->SubmitProjectInventorySnapshot(SnapshotObject, [StateStore = StateStore](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	HttpClient->SubmitProjectInventorySnapshot(SnapshotObject, [StateStore = StateStore, bSilent](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
 	{
-		StateStore->SetBusy(false);
+		if (!bSilent)
+		{
+			StateStore->SetBusy(false);
+		}
 		if (bSuccess)
 		{
-			StateStore->ApplyProjectInventorySnapshotResponse(JsonObject);
+			if (bSilent)
+			{
+				StateStore->SetStatusMessage(TEXT("Project Inventory auto-synced."));
+			}
+			else
+			{
+				StateStore->ApplyProjectInventorySnapshotResponse(JsonObject);
+			}
 			return;
 		}
 
-		StateStore->ApplyFailure(Message, RawText);
+		if (!bSilent)
+		{
+			StateStore->ApplyFailure(Message, RawText);
+		}
+		else
+		{
+			StateStore->SetStatusMessage(FString::Printf(TEXT("Project Inventory auto-sync skipped: %s"), *Message));
+		}
 	});
 }
 

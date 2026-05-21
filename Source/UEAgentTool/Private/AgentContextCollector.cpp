@@ -6,16 +6,26 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "ContentBrowserModule.h"
+#include "Components/ActorComponent.h"
+#include "Components/SceneComponent.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
+#include "Editor.h"
 #include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/Level.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/Texture.h"
+#include "Engine/World.h"
+#include "GameFramework/Actor.h"
 #include "IContentBrowserSingleton.h"
 #include "HAL/FileManager.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Materials/MaterialInstance.h"
+#include "MaterialShared.h"
 #include "Misc/App.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -299,6 +309,260 @@ namespace UEAgentContextCollectorPrivate
 		AssetObject->SetObjectField(TEXT("blueprint"), BlueprintObject);
 	}
 
+	static FString MobilityToString(const EComponentMobility::Type Mobility)
+	{
+		switch (Mobility)
+		{
+		case EComponentMobility::Static:
+			return TEXT("static");
+		case EComponentMobility::Stationary:
+			return TEXT("stationary");
+		case EComponentMobility::Movable:
+			return TEXT("movable");
+		default:
+			return TEXT("unknown");
+		}
+	}
+
+	static TSharedPtr<FJsonObject> MakeVectorObject(const FVector& Vector)
+	{
+		TSharedPtr<FJsonObject> VectorObject = MakeShared<FJsonObject>();
+		VectorObject->SetNumberField(TEXT("x"), Vector.X);
+		VectorObject->SetNumberField(TEXT("y"), Vector.Y);
+		VectorObject->SetNumberField(TEXT("z"), Vector.Z);
+		return VectorObject;
+	}
+
+	static TSharedPtr<FJsonObject> MakeRotatorObject(const FRotator& Rotator)
+	{
+		TSharedPtr<FJsonObject> RotatorObject = MakeShared<FJsonObject>();
+		RotatorObject->SetNumberField(TEXT("pitch"), Rotator.Pitch);
+		RotatorObject->SetNumberField(TEXT("yaw"), Rotator.Yaw);
+		RotatorObject->SetNumberField(TEXT("roll"), Rotator.Roll);
+		return RotatorObject;
+	}
+
+	static TSharedPtr<FJsonObject> MakeTransformObject(const FTransform& Transform)
+	{
+		TSharedPtr<FJsonObject> TransformObject = MakeShared<FJsonObject>();
+		TransformObject->SetObjectField(TEXT("location"), MakeVectorObject(Transform.GetLocation()));
+		TransformObject->SetObjectField(TEXT("rotation"), MakeRotatorObject(Transform.Rotator()));
+		TransformObject->SetObjectField(TEXT("scale"), MakeVectorObject(Transform.GetScale3D()));
+		return TransformObject;
+	}
+
+	static TSharedPtr<FJsonObject> MakeActorInventoryObject(const AActor* Actor)
+	{
+		if (Actor == nullptr)
+		{
+			return nullptr;
+		}
+
+		TSharedPtr<FJsonObject> ActorObject = MakeShared<FJsonObject>();
+		ActorObject->SetStringField(TEXT("actor_label"), Actor->GetActorLabel());
+		ActorObject->SetStringField(TEXT("actor_name"), Actor->GetName());
+		ActorObject->SetStringField(TEXT("actor_class"), Actor->GetClass() != nullptr ? Actor->GetClass()->GetPathName() : FString());
+		ActorObject->SetStringField(TEXT("actor_path"), Actor->GetPathName());
+		ActorObject->SetStringField(TEXT("folder_path"), Actor->GetFolderPath().ToString());
+		ActorObject->SetBoolField(TEXT("hidden_in_game"), Actor->IsHidden());
+		ActorObject->SetObjectField(TEXT("transform"), MakeTransformObject(Actor->GetActorTransform()));
+
+		if (const ULevel* Level = Actor->GetLevel())
+		{
+			const FString LevelName = Level->GetOutermost() != nullptr ? Level->GetOutermost()->GetName() : Level->GetName();
+			ActorObject->SetStringField(TEXT("level_name"), LevelName);
+		}
+
+		if (const UBlueprintGeneratedClass* BlueprintClass = Cast<UBlueprintGeneratedClass>(Actor->GetClass()))
+		{
+			if (BlueprintClass->ClassGeneratedBy != nullptr)
+			{
+				ActorObject->SetStringField(TEXT("blueprint_path"), BlueprintClass->ClassGeneratedBy->GetPathName());
+			}
+		}
+
+		if (const USceneComponent* RootComponent = Actor->GetRootComponent())
+		{
+			ActorObject->SetStringField(TEXT("mobility"), MobilityToString(RootComponent->Mobility));
+		}
+
+		TArray<FString> TagStrings;
+		for (const FName& Tag : Actor->Tags)
+		{
+			TagStrings.Add(Tag.ToString());
+			if (TagStrings.Num() >= 32)
+			{
+				break;
+			}
+		}
+		ActorObject->SetArrayField(TEXT("tags"), MakeStringArray(TagStrings, 32));
+
+		TArray<TSharedPtr<FJsonValue>> ComponentValues;
+		TArray<UActorComponent*> Components;
+		Actor->GetComponents(Components);
+		for (const UActorComponent* Component : Components)
+		{
+			if (Component == nullptr)
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> ComponentObject = MakeShared<FJsonObject>();
+			ComponentObject->SetStringField(TEXT("component_name"), Component->GetName());
+			ComponentObject->SetStringField(TEXT("component_class"), Component->GetClass() != nullptr ? Component->GetClass()->GetPathName() : FString());
+			if (const USceneComponent* SceneComponent = Cast<USceneComponent>(Component))
+			{
+				ComponentObject->SetStringField(TEXT("mobility"), MobilityToString(SceneComponent->Mobility));
+			}
+			ComponentValues.Add(MakeShared<FJsonValueObject>(ComponentObject));
+			if (ComponentValues.Num() >= 64)
+			{
+				break;
+			}
+		}
+		ActorObject->SetArrayField(TEXT("components"), ComponentValues);
+		return ActorObject;
+	}
+
+	static TSharedPtr<FJsonObject> MakeColorObject(const FLinearColor& Color)
+	{
+		TSharedPtr<FJsonObject> ColorObject = MakeShared<FJsonObject>();
+		ColorObject->SetNumberField(TEXT("r"), Color.R);
+		ColorObject->SetNumberField(TEXT("g"), Color.G);
+		ColorObject->SetNumberField(TEXT("b"), Color.B);
+		ColorObject->SetNumberField(TEXT("a"), Color.A);
+		return ColorObject;
+	}
+
+	static TSharedPtr<FJsonObject> MakeParameterObject(const FMaterialParameterInfo& ParameterInfo, const FString& ParameterType)
+	{
+		TSharedPtr<FJsonObject> ParameterObject = MakeShared<FJsonObject>();
+		ParameterObject->SetStringField(TEXT("name"), ParameterInfo.Name.ToString());
+		ParameterObject->SetStringField(TEXT("parameter_name"), ParameterInfo.Name.ToString());
+		ParameterObject->SetStringField(TEXT("parameter_type"), ParameterType);
+		return ParameterObject;
+	}
+
+	static void AddScalarMaterialParameters(const UMaterialInstance* MaterialInstance, TArray<TSharedPtr<FJsonValue>>& ParameterValues, TArray<TSharedPtr<FJsonValue>>& AllParameterValues)
+	{
+		TArray<FMaterialParameterInfo> ParameterInfos;
+		TArray<FGuid> ParameterIds;
+		MaterialInstance->GetAllScalarParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			float Value = 0.0f;
+			TSharedPtr<FJsonObject> ParameterObject = MakeParameterObject(ParameterInfo, TEXT("scalar"));
+			if (MaterialInstance->GetScalarParameterValue(ParameterInfo, Value))
+			{
+				ParameterObject->SetNumberField(TEXT("value"), Value);
+			}
+			ParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			AllParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			if (ParameterValues.Num() >= 128)
+			{
+				break;
+			}
+		}
+	}
+
+	static void AddVectorMaterialParameters(const UMaterialInstance* MaterialInstance, TArray<TSharedPtr<FJsonValue>>& ParameterValues, TArray<TSharedPtr<FJsonValue>>& AllParameterValues)
+	{
+		TArray<FMaterialParameterInfo> ParameterInfos;
+		TArray<FGuid> ParameterIds;
+		MaterialInstance->GetAllVectorParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			FLinearColor Value = FLinearColor::White;
+			TSharedPtr<FJsonObject> ParameterObject = MakeParameterObject(ParameterInfo, TEXT("vector"));
+			if (MaterialInstance->GetVectorParameterValue(ParameterInfo, Value))
+			{
+				ParameterObject->SetObjectField(TEXT("value"), MakeColorObject(Value));
+			}
+			ParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			AllParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			if (ParameterValues.Num() >= 128)
+			{
+				break;
+			}
+		}
+	}
+
+	static void AddTextureMaterialParameters(const UMaterialInstance* MaterialInstance, TArray<TSharedPtr<FJsonValue>>& ParameterValues, TArray<TSharedPtr<FJsonValue>>& AllParameterValues)
+	{
+		TArray<FMaterialParameterInfo> ParameterInfos;
+		TArray<FGuid> ParameterIds;
+		MaterialInstance->GetAllTextureParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			UTexture* Value = nullptr;
+			TSharedPtr<FJsonObject> ParameterObject = MakeParameterObject(ParameterInfo, TEXT("texture"));
+			if (MaterialInstance->GetTextureParameterValue(ParameterInfo, Value) && Value != nullptr)
+			{
+				ParameterObject->SetStringField(TEXT("texture_path"), Value->GetPathName());
+				ParameterObject->SetStringField(TEXT("value"), Value->GetPathName());
+			}
+			ParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			AllParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			if (ParameterValues.Num() >= 128)
+			{
+				break;
+			}
+		}
+	}
+
+	static void AddStaticSwitchMaterialParameters(const UMaterialInstance* MaterialInstance, TArray<TSharedPtr<FJsonValue>>& ParameterValues, TArray<TSharedPtr<FJsonValue>>& AllParameterValues)
+	{
+		TArray<FMaterialParameterInfo> ParameterInfos;
+		TArray<FGuid> ParameterIds;
+		MaterialInstance->GetAllStaticSwitchParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			bool bValue = false;
+			FGuid ExpressionGuid;
+			TSharedPtr<FJsonObject> ParameterObject = MakeParameterObject(ParameterInfo, TEXT("static_switch"));
+			if (MaterialInstance->GetStaticSwitchParameterValue(ParameterInfo, bValue, ExpressionGuid))
+			{
+				ParameterObject->SetBoolField(TEXT("value"), bValue);
+			}
+			ParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			AllParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			if (ParameterValues.Num() >= 128)
+			{
+				break;
+			}
+		}
+	}
+
+	static TSharedPtr<FJsonObject> MakeMaterialInstanceInventoryObject(const FAssetData& AssetData, const UMaterialInstance* MaterialInstance)
+	{
+		if (MaterialInstance == nullptr)
+		{
+			return nullptr;
+		}
+
+		TSharedPtr<FJsonObject> MaterialObject = MakeShared<FJsonObject>();
+		MaterialObject->SetStringField(TEXT("material_instance_path"), AssetData.GetSoftObjectPath().ToString());
+		MaterialObject->SetStringField(TEXT("material_instance_name"), AssetData.AssetName.ToString());
+		MaterialObject->SetStringField(TEXT("parent_material"), MaterialInstance->Parent != nullptr ? MaterialInstance->Parent->GetPathName() : FString());
+
+		TArray<TSharedPtr<FJsonValue>> AllParameterValues;
+		TArray<TSharedPtr<FJsonValue>> ScalarValues;
+		TArray<TSharedPtr<FJsonValue>> VectorValues;
+		TArray<TSharedPtr<FJsonValue>> TextureValues;
+		TArray<TSharedPtr<FJsonValue>> StaticSwitchValues;
+		AddScalarMaterialParameters(MaterialInstance, ScalarValues, AllParameterValues);
+		AddVectorMaterialParameters(MaterialInstance, VectorValues, AllParameterValues);
+		AddTextureMaterialParameters(MaterialInstance, TextureValues, AllParameterValues);
+		AddStaticSwitchMaterialParameters(MaterialInstance, StaticSwitchValues, AllParameterValues);
+
+		MaterialObject->SetArrayField(TEXT("parameters"), AllParameterValues);
+		MaterialObject->SetArrayField(TEXT("scalar_parameters"), ScalarValues);
+		MaterialObject->SetArrayField(TEXT("vector_parameters"), VectorValues);
+		MaterialObject->SetArrayField(TEXT("texture_parameters"), TextureValues);
+		MaterialObject->SetArrayField(TEXT("static_switch_parameters"), StaticSwitchValues);
+		return MaterialObject;
+	}
+
 	static bool IsValidSymbolToken(const FString& Token)
 	{
 		if (Token.IsEmpty() || Token.Contains(TEXT("(")) || Token.Contains(TEXT("=")))
@@ -529,6 +793,7 @@ TSharedPtr<FJsonObject> FUEAgentContextCollector::BuildProjectInventorySnapshot(
 	ScanDiagnosticsObject->SetNumberField(TEXT("max_code_files"), MaxCodeFiles);
 
 	TArray<TSharedPtr<FJsonValue>> AssetValues;
+	TArray<TSharedPtr<FJsonValue>> MaterialInstanceValues;
 	if (FModuleManager::Get().ModuleExists(TEXT("AssetRegistry")))
 	{
 		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
@@ -578,11 +843,25 @@ TSharedPtr<FJsonObject> FUEAgentContextCollector::BuildProjectInventorySnapshot(
 			AssetObject->SetArrayField(TEXT("dependencies"), UEAgentContextCollectorPrivate::MakeStringArray(Dependencies, 64));
 			AssetObject->SetArrayField(TEXT("referencers"), UEAgentContextCollectorPrivate::MakeStringArray(Referencers, 64));
 
-			if (AssetType.Equals(TEXT("StaticMesh"), ESearchCase::IgnoreCase) || AssetType.Equals(TEXT("Blueprint"), ESearchCase::IgnoreCase) || AssetType.Contains(TEXT("Blueprint")))
+			const bool bIsStaticMesh = AssetType.Equals(TEXT("StaticMesh"), ESearchCase::IgnoreCase);
+			const bool bIsBlueprint = AssetType.Equals(TEXT("Blueprint"), ESearchCase::IgnoreCase) || AssetType.Contains(TEXT("Blueprint"));
+			const bool bIsMaterialInstance = AssetType.Contains(TEXT("MaterialInstance"), ESearchCase::IgnoreCase);
+			if (bIsStaticMesh || bIsBlueprint || bIsMaterialInstance)
 			{
 				UObject* LoadedAsset = AssetData.GetAsset();
 				UEAgentContextCollectorPrivate::AddStaticMeshInventoryDetails(Cast<UStaticMesh>(LoadedAsset), SettingsObject);
 				UEAgentContextCollectorPrivate::AddBlueprintInventoryDetails(Cast<UBlueprint>(LoadedAsset), AssetObject);
+				if (bIsMaterialInstance)
+				{
+					if (const UMaterialInstance* MaterialInstance = Cast<UMaterialInstance>(LoadedAsset))
+					{
+						TSharedPtr<FJsonObject> MaterialObject = UEAgentContextCollectorPrivate::MakeMaterialInstanceInventoryObject(AssetData, MaterialInstance);
+						if (MaterialObject.IsValid())
+						{
+							MaterialInstanceValues.Add(MakeShared<FJsonValueObject>(MaterialObject));
+						}
+					}
+				}
 			}
 
 			AssetObject->SetObjectField(TEXT("settings"), SettingsObject);
@@ -592,6 +871,7 @@ TSharedPtr<FJsonObject> FUEAgentContextCollector::BuildProjectInventorySnapshot(
 
 		ScanDiagnosticsObject->SetNumberField(TEXT("asset_registry_count"), ProjectAssets.Num());
 		ScanDiagnosticsObject->SetBoolField(TEXT("asset_limit_reached"), MaxAssets > 0 && ProjectAssets.Num() > MaxAssets);
+		ScanDiagnosticsObject->SetNumberField(TEXT("material_instance_scan_count"), MaterialInstanceValues.Num());
 	}
 	else
 	{
@@ -643,8 +923,59 @@ TSharedPtr<FJsonObject> FUEAgentContextCollector::BuildProjectInventorySnapshot(
 	ScanDiagnosticsObject->SetNumberField(TEXT("code_file_scan_count"), CandidateFiles.Num());
 	ScanDiagnosticsObject->SetBoolField(TEXT("code_file_limit_reached"), MaxCodeFiles > 0 && CandidateFiles.Num() > MaxCodeFiles);
 
+	TArray<TSharedPtr<FJsonValue>> LevelActorValues;
+	if (GEditor != nullptr)
+	{
+		if (UWorld* EditorWorld = GEditor->GetEditorWorldContext().World())
+		{
+			for (ULevel* Level : EditorWorld->GetLevels())
+			{
+				if (Level == nullptr)
+				{
+					continue;
+				}
+
+				for (const TObjectPtr<AActor>& ActorPtr : Level->Actors)
+				{
+					if (LevelActorValues.Num() >= 1000)
+					{
+						break;
+					}
+					AActor* Actor = ActorPtr.Get();
+					if (!IsValid(Actor))
+					{
+						continue;
+					}
+
+					TSharedPtr<FJsonObject> ActorObject = UEAgentContextCollectorPrivate::MakeActorInventoryObject(Actor);
+					if (ActorObject.IsValid())
+					{
+						LevelActorValues.Add(MakeShared<FJsonValueObject>(ActorObject));
+					}
+				}
+
+				if (LevelActorValues.Num() >= 1000)
+				{
+					break;
+				}
+			}
+			ScanDiagnosticsObject->SetNumberField(TEXT("level_actor_scan_count"), LevelActorValues.Num());
+			ScanDiagnosticsObject->SetBoolField(TEXT("level_actor_limit_reached"), LevelActorValues.Num() >= 1000);
+		}
+		else
+		{
+			ScanDiagnosticsObject->SetStringField(TEXT("level_actor_scan_status"), TEXT("editor_world_unavailable"));
+		}
+	}
+	else
+	{
+		ScanDiagnosticsObject->SetStringField(TEXT("level_actor_scan_status"), TEXT("editor_unavailable"));
+	}
+
 	SnapshotObject->SetArrayField(TEXT("assets"), AssetValues);
 	SnapshotObject->SetArrayField(TEXT("code_files"), CodeFileValues);
+	SnapshotObject->SetArrayField(TEXT("level_actors"), LevelActorValues);
+	SnapshotObject->SetArrayField(TEXT("material_instances"), MaterialInstanceValues);
 	SnapshotObject->SetObjectField(TEXT("scan_diagnostics"), ScanDiagnosticsObject);
 	return SnapshotObject;
 }

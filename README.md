@@ -7,7 +7,7 @@ UEAgentTool is an Unreal Engine editor plugin that connects a local UE workflow 
 - Local Unreal Editor plugin for personal/editor workflow use.
 - Communicates with UEAgentBackend over local HTTP.
 - Editor write operations require user confirmation before execution.
-- Project Inventory snapshots can be submitted to the backend for project-aware QA.
+- Project Inventory snapshots are auto-submitted once when the panel opens, and can also be submitted manually for project-aware QA. They include assets, code files, loaded level actors, and Material Instance parameters.
 
 ## Requirements
 

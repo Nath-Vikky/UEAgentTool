@@ -2528,6 +2528,8 @@ void FUEAgentStateStore::ApplyProjectInventorySnapshotResponse(const TSharedPtr<
 
 	const int32 AssetCount = PickCount(TEXT("asset_count"), TEXT("assets_count"));
 	const int32 CodeFileCount = PickCount(TEXT("code_file_count"), TEXT("code_files_count"));
+	const int32 LevelActorCount = PickCount(TEXT("level_actor_count"), TEXT("level_actors_count"));
+	const int32 MaterialInstanceCount = PickCount(TEXT("material_instance_count"), TEXT("material_instances_count"));
 	const FString SnapshotId = UEAgentStateStorePrivate::GetStringOrDefault(SnapshotObject, TEXT("snapshot_id"),
 		UEAgentStateStorePrivate::GetStringOrDefault(ResponseObject, TEXT("snapshot_id"),
 			UEAgentStateStorePrivate::GetStringOrDefault(DataObject, TEXT("snapshot_id"))));
@@ -2601,6 +2603,14 @@ void FUEAgentStateStore::ApplyProjectInventorySnapshotResponse(const TSharedPtr<
 	{
 		SummaryBlock.Items.Add(FString::Printf(TEXT("%s%d"), *UEAgentStateStorePrivate::GetLocalizedUiText(UiLanguage, TEXT("代码文件数量："), TEXT("Code File Count: ")), CodeFileCount));
 	}
+	if (LevelActorCount != INDEX_NONE)
+	{
+		SummaryBlock.Items.Add(FString::Printf(TEXT("%s%d"), *UEAgentStateStorePrivate::GetLocalizedUiText(UiLanguage, TEXT("关卡 Actor 数量："), TEXT("Level Actor Count: ")), LevelActorCount));
+	}
+	if (MaterialInstanceCount != INDEX_NONE)
+	{
+		SummaryBlock.Items.Add(FString::Printf(TEXT("%s%d"), *UEAgentStateStorePrivate::GetLocalizedUiText(UiLanguage, TEXT("材质实例数量："), TEXT("Material Instance Count: ")), MaterialInstanceCount));
+	}
 	const FString AssetTypeCounts = SummarizeNumberObject(UEAgentStateStorePrivate::GetObjectField(SummaryObject, TEXT("asset_type_counts")));
 	if (!AssetTypeCounts.IsEmpty())
 	{
@@ -2629,9 +2639,11 @@ void FUEAgentStateStore::ApplyProjectInventorySnapshotResponse(const TSharedPtr<
 
 	const FString AssetCountText = AssetCount == INDEX_NONE ? UEAgentStateStorePrivate::GetLocalizedUiText(UiLanguage, TEXT("未知"), TEXT("Unknown")) : FString::FromInt(AssetCount);
 	const FString CodeFileCountText = CodeFileCount == INDEX_NONE ? UEAgentStateStorePrivate::GetLocalizedUiText(UiLanguage, TEXT("未知"), TEXT("Unknown")) : FString::FromInt(CodeFileCount);
+	const FString LevelActorCountText = LevelActorCount == INDEX_NONE ? UEAgentStateStorePrivate::GetLocalizedUiText(UiLanguage, TEXT("未知"), TEXT("Unknown")) : FString::FromInt(LevelActorCount);
+	const FString MaterialInstanceCountText = MaterialInstanceCount == INDEX_NONE ? UEAgentStateStorePrivate::GetLocalizedUiText(UiLanguage, TEXT("未知"), TEXT("Unknown")) : FString::FromInt(MaterialInstanceCount);
 	LastResult.UserText = UEAgent::IsEnglishOutputLanguage(UiLanguage)
-		? FString::Printf(TEXT("Project Inventory snapshot submitted. Assets: %s, code files: %s."), *AssetCountText, *CodeFileCountText)
-		: FString::Printf(TEXT("已提交 Project Inventory 快照。资产：%s，代码文件：%s。"), *AssetCountText, *CodeFileCountText);
+		? FString::Printf(TEXT("Project Inventory snapshot submitted. Assets: %s, code files: %s, level actors: %s, material instances: %s."), *AssetCountText, *CodeFileCountText, *LevelActorCountText, *MaterialInstanceCountText)
+		: FString::Printf(TEXT("已提交 Project Inventory 快照。资产：%s，代码文件：%s，关卡 Actor：%s，材质实例：%s。"), *AssetCountText, *CodeFileCountText, *LevelActorCountText, *MaterialInstanceCountText);
 	LastResult.OverviewText = LastResult.UserText;
 	StatusMessage = LastResult.UserText;
 	RebuildMonitorJson();

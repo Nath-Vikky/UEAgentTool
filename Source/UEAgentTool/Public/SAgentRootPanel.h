@@ -44,7 +44,7 @@ private:
 	void ConfirmEditorOperationProposal(const TSharedPtr<FUEAgentProposalSummary>& Proposal);
 	void RejectEditorOperationProposal(const TSharedPtr<FUEAgentProposalSummary>& Proposal);
 	void ExecuteAndReportEditorOperation(const TSharedPtr<FUEAgentProposalSummary>& Proposal);
-	void SubmitProjectInventorySnapshot();
+	void SubmitProjectInventorySnapshot(bool bSilent = false);
 	void ApplyQuickAction(const FUEAgentQuickAction& QuickAction);
 	void ApplyBaseUrl();
 	void SetPreferredOutputLanguage(const FString& InLanguageCode);
@@ -112,4 +112,5 @@ private:
 	TSharedPtr<class SBox> DebugSectionBodyBox;
 	TSharedPtr<class SMultiLineEditableTextBox> ChatInputBox;
 	TSharedPtr<class SEditableTextBox> BaseUrlTextBox;
+	bool bAutoInventorySubmitted = false;
 };
