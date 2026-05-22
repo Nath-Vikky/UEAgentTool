@@ -3465,6 +3465,49 @@ namespace UEAgentRootPanelPrivate
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), MaterialInstance->GetOutermost() != nullptr ? MaterialInstance->GetOutermost()->GetName() : FString());
 		return ExecutionResult;
 	}
+	static FEditorOperationExecutionResult ExecuteSetMaterialInstanceStaticSwitch(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("UMaterialInstanceConstant.SetStaticSwitchParameterValueEditorOnly"));
+
+		const FString MaterialInstancePath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("material_instance_path")));
+		const FString ParameterName = GetScalarFieldAsString(PayloadObject, TEXT("parameter_name")).TrimStartAndEnd();
+		bool bSwitchValue = false;
+		if (MaterialInstancePath.IsEmpty() || ParameterName.IsEmpty() || !TryGetBoolField(PayloadObject, TEXT("value"), bSwitchValue))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("material_instance_path, parameter_name and boolean value are required."));
+			return ExecutionResult;
+		}
+
+		UMaterialInstanceConstant* MaterialInstance = Cast<UMaterialInstanceConstant>(LoadEditorAsset(MaterialInstancePath));
+		if (MaterialInstance == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("material_instance_not_found"), FString::Printf(TEXT("Material Instance Constant not found: %s"), *MaterialInstancePath));
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Set Material Instance Static Switch")));
+		MaterialInstance->Modify();
+		const FMaterialParameterInfo ParameterInfo{FName(*ParameterName)};
+		MaterialInstance->SetStaticSwitchParameterValueEditorOnly(ParameterInfo, bSwitchValue);
+		MaterialInstance->PostEditChange();
+		MaterialInstance->MarkPackageDirty();
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo or source control to revert the Material Instance static switch change. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("material_instance_path"), MaterialInstancePath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("parameter_name"), ParameterName);
+		ExecutionResult.ResultObject->SetBoolField(TEXT("value"), bSwitchValue);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("value"), bSwitchValue ? TEXT("true") : TEXT("false"));
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), MaterialInstance->GetOutermost() != nullptr ? MaterialInstance->GetOutermost()->GetName() : FString());
+		return ExecutionResult;
+	}
 
 	static bool BindEditorOperationExecutor(FUEAgentEditorToolDefinition& Definition)
 	{
@@ -3561,6 +3604,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("set_material_instance_texture_parameter"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetMaterialInstanceTextureParameter);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("set_material_instance_static_switch"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetMaterialInstanceStaticSwitch);
 			return true;
 		}
 		return false;

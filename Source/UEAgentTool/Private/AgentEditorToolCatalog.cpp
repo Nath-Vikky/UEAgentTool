@@ -178,6 +178,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		TEXT("material"),
 		{ TEXT("material_instance_path"), TEXT("parameter_name"), TEXT("texture_path") },
 		{ TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("set_material_instance_static_switch")),
+		TEXT("set_material_instance_static_switch"),
+		TEXT("Set one static switch parameter on a Material Instance after backend Proposal confirmation."),
+		TEXT("material"),
+		{ TEXT("material_instance_path"), TEXT("parameter_name"), TEXT("value") },
+		{ TEXT("reason"), TEXT("source_task_id") }));
 	return Definitions;
 }
 
