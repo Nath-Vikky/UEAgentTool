@@ -3120,6 +3120,125 @@ namespace UEAgentRootPanelPrivate
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
 		return ExecutionResult;
 	}
+	static FEditorOperationExecutionResult ExecuteSetUmgWidgetAppearance(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("UWidget appearance setters"));
+
+		const FString WidgetBlueprintPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("widget_blueprint_path")));
+		const FString WidgetName = GetScalarFieldAsString(PayloadObject, TEXT("widget_name")).TrimStartAndEnd();
+		const TSharedPtr<FJsonObject> AppearanceObject = GetObjectField(PayloadObject, TEXT("appearance"));
+		if (WidgetBlueprintPath.IsEmpty() || WidgetName.IsEmpty() || !AppearanceObject.IsValid())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("widget_blueprint_path, widget_name and appearance are required."));
+			return ExecutionResult;
+		}
+
+		double RenderOpacity = 0.0;
+		const bool bHasRenderOpacity = AppearanceObject->TryGetNumberField(TEXT("render_opacity"), RenderOpacity);
+		bool bIsEnabled = false;
+		const bool bHasIsEnabled = AppearanceObject->TryGetBoolField(TEXT("is_enabled"), bIsEnabled);
+		FLinearColor ColorAndOpacity;
+		const bool bHasColorAndOpacity = TryReadLinearColorObject(GetObjectField(AppearanceObject, TEXT("color_and_opacity")), ColorAndOpacity);
+		int32 FontSize = 0;
+		const bool bHasFontSize = TryGetIntegerField(AppearanceObject, TEXT("font_size"), FontSize);
+		if (!bHasRenderOpacity && !bHasIsEnabled && !bHasColorAndOpacity && !bHasFontSize)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("appearance_empty"), TEXT("appearance must contain render_opacity, is_enabled, color_and_opacity, or font_size."));
+			return ExecutionResult;
+		}
+
+		UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprintAsset(WidgetBlueprintPath);
+		if (WidgetBlueprint == nullptr || WidgetBlueprint->WidgetTree == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_blueprint_not_found"), FString::Printf(TEXT("Widget Blueprint not found: %s"), *WidgetBlueprintPath));
+			return ExecutionResult;
+		}
+
+		UWidget* TargetWidget = nullptr;
+		WidgetBlueprint->WidgetTree->ForEachWidget([&TargetWidget, WidgetName](UWidget* ExistingWidget)
+		{
+			if (ExistingWidget != nullptr && ExistingWidget->GetName().Equals(WidgetName, ESearchCase::IgnoreCase))
+			{
+				TargetWidget = ExistingWidget;
+			}
+		});
+		if (TargetWidget == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_not_found"), WidgetName);
+			return ExecutionResult;
+		}
+
+		UTextBlock* TextBlock = Cast<UTextBlock>(TargetWidget);
+		if ((bHasColorAndOpacity || bHasFontSize) && TextBlock == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("textblock_required"), TEXT("color_and_opacity and font_size are currently supported only for UTextBlock widgets."));
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Set UMG Widget Appearance")));
+		WidgetBlueprint->Modify();
+		WidgetBlueprint->WidgetTree->Modify();
+		TargetWidget->Modify();
+
+		if (bHasRenderOpacity)
+		{
+			const float ClampedOpacity = FMath::Clamp(static_cast<float>(RenderOpacity), 0.0f, 1.0f);
+			TargetWidget->SetRenderOpacity(ClampedOpacity);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("render_opacity"), FString::SanitizeFloat(ClampedOpacity));
+		}
+		if (bHasIsEnabled)
+		{
+			TargetWidget->SetIsEnabled(bIsEnabled);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("is_enabled"), bIsEnabled ? TEXT("true") : TEXT("false"));
+		}
+		if (TextBlock != nullptr && bHasColorAndOpacity)
+		{
+			TextBlock->SetColorAndOpacity(FSlateColor(ColorAndOpacity));
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("color_and_opacity"), ColorAndOpacity.ToString());
+		}
+		if (TextBlock != nullptr && bHasFontSize)
+		{
+			FSlateFontInfo FontInfo = TextBlock->GetFont();
+			FontInfo.Size = FontSize;
+			TextBlock->SetFont(FontInfo);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("font_size"), FString::FromInt(FontSize));
+		}
+		TargetWidget->PostEditChange();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to revert the widget appearance. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_blueprint_path"), WidgetBlueprintPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_name"), WidgetName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		if (bHasRenderOpacity)
+		{
+			ExecutionResult.ResultObject->SetNumberField(TEXT("render_opacity"), FMath::Clamp(RenderOpacity, 0.0, 1.0));
+		}
+		if (bHasIsEnabled)
+		{
+			ExecutionResult.ResultObject->SetBoolField(TEXT("is_enabled"), bIsEnabled);
+		}
+		if (bHasColorAndOpacity)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("color_and_opacity"), ColorAndOpacity.ToString());
+		}
+		if (bHasFontSize)
+		{
+			ExecutionResult.ResultObject->SetNumberField(TEXT("font_size"), FontSize);
+		}
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
+		return ExecutionResult;
+	}
 	static FEditorOperationExecutionResult ExecutePlaceActorInLevel(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -3751,6 +3870,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("set_umg_widget_visibility"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetUmgWidgetVisibility);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("set_umg_widget_appearance"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetUmgWidgetAppearance);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("place_actor_in_level"), ESearchCase::IgnoreCase))
