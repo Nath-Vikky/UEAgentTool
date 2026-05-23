@@ -34,6 +34,7 @@
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture.h"
+#include "Engine/Texture2D.h"
 #include "Engine/World.h"
 #include "Framework/Application/SlateApplication.h"
 #include "GameFramework/Actor.h"
@@ -54,6 +55,7 @@
 #include "Kismet/KismetSystemLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "MaterialShared.h"
 #include "Misc/PackageName.h"
@@ -64,6 +66,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "ScopedTransaction.h"
 #include "Styling/AppStyle.h"
+#include "Styling/SlateBrush.h"
 #include "Templates/SubclassOf.h"
 #include "UObject/Class.h"
 #include "UObject/UnrealType.h"
@@ -3239,6 +3242,136 @@ namespace UEAgentRootPanelPrivate
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
 		return ExecutionResult;
 	}
+	static FEditorOperationExecutionResult ExecuteSetUmgWidgetBrush(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("UImage/UBorder.SetBrush"));
+
+		const FString WidgetBlueprintPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("widget_blueprint_path")));
+		const FString WidgetName = GetScalarFieldAsString(PayloadObject, TEXT("widget_name")).TrimStartAndEnd();
+		const TSharedPtr<FJsonObject> BrushObject = GetObjectField(PayloadObject, TEXT("brush"));
+		FString ResourceType = GetScalarFieldAsString(BrushObject, TEXT("resource_type")).TrimStartAndEnd().ToLower();
+		const FString RawResourcePath = FirstNonEmptyString(BrushObject, { TEXT("resource_path"), TEXT("texture_path"), TEXT("material_path") }).TrimStartAndEnd();
+		const FString ResourcePath = RawResourcePath.IsEmpty() ? FString() : NormalizeAssetPackagePath(RawResourcePath);
+		if (ResourceType.IsEmpty())
+		{
+			if (!GetScalarFieldAsString(BrushObject, TEXT("texture_path")).TrimStartAndEnd().IsEmpty())
+			{
+				ResourceType = TEXT("texture");
+			}
+			else if (!GetScalarFieldAsString(BrushObject, TEXT("material_path")).TrimStartAndEnd().IsEmpty())
+			{
+				ResourceType = TEXT("material");
+			}
+		}
+		if (WidgetBlueprintPath.IsEmpty() || WidgetName.IsEmpty() || !BrushObject.IsValid() || ResourceType.IsEmpty() || ResourcePath.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("widget_blueprint_path, widget_name and brush.resource_type/resource_path are required."));
+			return ExecutionResult;
+		}
+		if (ResourceType != TEXT("texture") && ResourceType != TEXT("material"))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("brush_resource_type_not_supported"), TEXT("Only texture and material brush resources are supported."));
+			return ExecutionResult;
+		}
+
+		UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprintAsset(WidgetBlueprintPath);
+		if (WidgetBlueprint == nullptr || WidgetBlueprint->WidgetTree == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_blueprint_not_found"), FString::Printf(TEXT("Widget Blueprint not found: %s"), *WidgetBlueprintPath));
+			return ExecutionResult;
+		}
+
+		UWidget* TargetWidget = nullptr;
+		WidgetBlueprint->WidgetTree->ForEachWidget([&TargetWidget, WidgetName](UWidget* ExistingWidget)
+		{
+			if (ExistingWidget != nullptr && ExistingWidget->GetName().Equals(WidgetName, ESearchCase::IgnoreCase))
+			{
+				TargetWidget = ExistingWidget;
+			}
+		});
+		if (TargetWidget == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_not_found"), WidgetName);
+			return ExecutionResult;
+		}
+
+		UImage* ImageWidget = Cast<UImage>(TargetWidget);
+		UBorder* BorderWidget = Cast<UBorder>(TargetWidget);
+		if (ImageWidget == nullptr && BorderWidget == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("image_or_border_required"), TEXT("set_umg_widget_brush currently supports UImage and UBorder widgets only."));
+			return ExecutionResult;
+		}
+
+		UObject* BrushResource = nullptr;
+		FSlateBrush NewBrush;
+		NewBrush.DrawAs = ESlateBrushDrawType::Image;
+		if (ResourceType == TEXT("texture"))
+		{
+			UTexture* Texture = Cast<UTexture>(LoadEditorAsset(ResourcePath));
+			if (Texture == nullptr)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("texture_not_found"), FString::Printf(TEXT("Texture asset not found: %s"), *ResourcePath));
+				return ExecutionResult;
+			}
+			BrushResource = Texture;
+			if (UTexture2D* Texture2D = Cast<UTexture2D>(Texture))
+			{
+				NewBrush.ImageSize = FVector2D(Texture2D->GetSizeX(), Texture2D->GetSizeY());
+			}
+		}
+		else
+		{
+			UMaterialInterface* Material = Cast<UMaterialInterface>(LoadEditorAsset(ResourcePath));
+			if (Material == nullptr)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("material_not_found"), FString::Printf(TEXT("Material asset not found: %s"), *ResourcePath));
+				return ExecutionResult;
+			}
+			BrushResource = Material;
+		}
+		NewBrush.SetResourceObject(BrushResource);
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Set UMG Widget Brush")));
+		WidgetBlueprint->Modify();
+		WidgetBlueprint->WidgetTree->Modify();
+		TargetWidget->Modify();
+		if (ImageWidget != nullptr)
+		{
+			ImageWidget->SetBrush(NewBrush);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("widget_class"), TEXT("Image"));
+		}
+		else if (BorderWidget != nullptr)
+		{
+			BorderWidget->SetBrush(NewBrush);
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("widget_class"), TEXT("Border"));
+		}
+		TargetWidget->PostEditChange();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to revert the widget brush. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_blueprint_path"), WidgetBlueprintPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_name"), WidgetName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("resource_type"), ResourceType);
+		ExecutionResult.ResultObject->SetStringField(TEXT("resource_path"), ResourcePath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("brush.resource_type"), ResourceType);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("brush.resource_path"), ResourcePath);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
+		return ExecutionResult;
+	}
 	static FEditorOperationExecutionResult ExecutePlaceActorInLevel(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -3875,6 +4008,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("set_umg_widget_appearance"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetUmgWidgetAppearance);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("set_umg_widget_brush"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetUmgWidgetBrush);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("place_actor_in_level"), ESearchCase::IgnoreCase))

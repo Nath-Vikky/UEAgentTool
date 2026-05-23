@@ -158,6 +158,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("appearance") },
 		{ TEXT("reason"), TEXT("source_task_id") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("set_umg_widget_brush")),
+		TEXT("set_umg_widget_brush"),
+		TEXT("Set Image or Border brush resource on one UMG widget after backend Proposal confirmation."),
+		TEXT("umg"),
+		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("brush") },
+		{ TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("place_actor_in_level")),
 		TEXT("place_actor_in_level"),
 		TEXT("Place one Actor in the current editor level after backend Proposal confirmation."),
