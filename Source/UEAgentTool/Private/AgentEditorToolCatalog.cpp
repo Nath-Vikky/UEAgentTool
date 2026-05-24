@@ -193,6 +193,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("actor_reference"), TEXT("metadata") },
 		{ TEXT("reason"), TEXT("source_task_id") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("arrange_actors_pattern")),
+		TEXT("arrange_actors_pattern"),
+		TEXT("Arrange a bounded Actor set with line, grid, or circle placement templates after backend Proposal confirmation."),
+		TEXT("level"),
+		{ TEXT("actor_references"), TEXT("pattern") },
+		{ TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("set_material_instance_parameter")),
 		TEXT("set_material_instance_parameter"),
 		TEXT("Set one scalar or vector parameter on a Material Instance after backend Proposal confirmation."),

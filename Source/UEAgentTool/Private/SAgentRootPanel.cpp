@@ -4089,6 +4089,149 @@ namespace UEAgentRootPanelPrivate
 		}
 		return ExecutionResult;
 	}
+	static FEditorOperationExecutionResult ExecuteArrangeActorsPattern(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("AActor.SetActorLocation pattern"));
+
+		const TArray<FString> ActorReferences = GetStringArrayField(PayloadObject, TEXT("actor_references"));
+		const TSharedPtr<FJsonObject> PatternObject = GetObjectField(PayloadObject, TEXT("pattern"));
+		const FString PatternType = GetScalarFieldAsString(PatternObject, TEXT("type")).TrimStartAndEnd().ToLower();
+		if (ActorReferences.Num() < 2 || !PatternObject.IsValid() || PatternType.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("actor_references must contain at least two actors and pattern.type is required."));
+			return ExecutionResult;
+		}
+		if (ActorReferences.Num() > 12)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("actor_reference_limit_exceeded"), TEXT("arrange_actors_pattern supports at most 12 actors."));
+			return ExecutionResult;
+		}
+		if (PatternType != TEXT("line") && PatternType != TEXT("grid") && PatternType != TEXT("circle"))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("pattern_type_not_supported"), TEXT("Only line, grid and circle patterns are supported."));
+			return ExecutionResult;
+		}
+		if (GEditor == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("editor_unavailable"), TEXT("GEditor is unavailable."));
+			return ExecutionResult;
+		}
+
+		UWorld* EditorWorld = GEditor->GetEditorWorldContext().World();
+		TArray<AActor*> Actors;
+		for (const FString& ActorReference : ActorReferences)
+		{
+			AActor* Actor = FindActorByReference(EditorWorld, ActorReference);
+			if (Actor == nullptr)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("actor_not_found"), ActorReference);
+				return ExecutionResult;
+			}
+			Actors.Add(Actor);
+		}
+
+		double SpacingValue = 200.0;
+		PatternObject->TryGetNumberField(TEXT("spacing"), SpacingValue);
+		const float Spacing = FMath::Max(1.0f, static_cast<float>(SpacingValue));
+		FVector Origin = Actors[0]->GetActorLocation();
+		FVector OriginPayload;
+		if (TryReadVectorField(PatternObject, TEXT("origin"), OriginPayload))
+		{
+			Origin = OriginPayload;
+		}
+		const FString Axis = GetScalarFieldAsString(PatternObject, TEXT("axis")).TrimStartAndEnd().ToLower();
+		const bool bUseYAxis = Axis == TEXT("y");
+
+		int32 Columns = FMath::CeilToInt(FMath::Sqrt(static_cast<float>(Actors.Num())));
+		int32 ColumnsPayload = 0;
+		if (TryGetIntegerField(PatternObject, TEXT("columns"), ColumnsPayload) && ColumnsPayload > 0)
+		{
+			Columns = FMath::Clamp(ColumnsPayload, 1, Actors.Num());
+		}
+		double RadiusValue = FMath::Max(Spacing, static_cast<float>(Actors.Num()) * Spacing / (2.0f * PI));
+		PatternObject->TryGetNumberField(TEXT("radius"), RadiusValue);
+		const float Radius = FMath::Max(1.0f, static_cast<float>(RadiusValue));
+
+		TArray<FVector> TargetLocations;
+		for (int32 Index = 0; Index < Actors.Num(); ++Index)
+		{
+			FVector TargetLocation = Origin;
+			if (PatternType == TEXT("circle"))
+			{
+				const float Angle = (2.0f * PI * static_cast<float>(Index)) / static_cast<float>(Actors.Num());
+				TargetLocation.X += FMath::Cos(Angle) * Radius;
+				TargetLocation.Y += FMath::Sin(Angle) * Radius;
+			}
+			else if (PatternType == TEXT("grid"))
+			{
+				const int32 Row = Index / Columns;
+				const int32 Column = Index % Columns;
+				TargetLocation.X += static_cast<float>(Column) * Spacing;
+				TargetLocation.Y += static_cast<float>(Row) * Spacing;
+			}
+			else
+			{
+				if (bUseYAxis)
+				{
+					TargetLocation.Y += static_cast<float>(Index) * Spacing;
+				}
+				else
+				{
+					TargetLocation.X += static_cast<float>(Index) * Spacing;
+				}
+			}
+			TargetLocations.Add(TargetLocation);
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Arrange Actors Pattern")));
+		TSet<ULevel*> DirtyLevels;
+		for (int32 Index = 0; Index < Actors.Num(); ++Index)
+		{
+			AActor* Actor = Actors[Index];
+			Actor->SetFlags(RF_Transactional);
+			Actor->Modify();
+			if (ULevel* ActorLevel = Actor->GetLevel())
+			{
+				ActorLevel->Modify();
+				DirtyLevels.Add(ActorLevel);
+			}
+			Actor->SetActorLocation(TargetLocations[Index]);
+			Actor->PostEditMove(true);
+		}
+		for (ULevel* DirtyLevel : DirtyLevels)
+		{
+			if (DirtyLevel != nullptr)
+			{
+				DirtyLevel->MarkPackageDirty();
+			}
+		}
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to revert the Actor arrangement. The level is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("pattern_type"), PatternType);
+		ExecutionResult.ResultObject->SetNumberField(TEXT("item_count"), Actors.Num());
+		ExecutionResult.ResultObject->SetStringField(TEXT("origin"), Origin.ToString());
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		for (int32 Index = 0; Index < Actors.Num(); ++Index)
+		{
+			const FString Summary = FString::Printf(TEXT("%s -> %s"), *Actors[Index]->GetActorLabel(), *TargetLocations[Index].ToString());
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("arranged_actors"), Summary);
+		}
+		for (ULevel* DirtyLevel : DirtyLevels)
+		{
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), DirtyLevel != nullptr && DirtyLevel->GetOutermost() != nullptr ? DirtyLevel->GetOutermost()->GetName() : FString());
+		}
+		return ExecutionResult;
+	}
 	static FEditorOperationExecutionResult ExecuteSetMaterialInstanceParameter(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -4362,6 +4505,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("set_actor_metadata"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetActorMetadata);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("arrange_actors_pattern"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteArrangeActorsPattern);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("set_material_instance_parameter"), ESearchCase::IgnoreCase))
