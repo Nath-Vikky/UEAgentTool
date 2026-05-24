@@ -15,12 +15,15 @@
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/HorizontalBox.h"
+#include "Components/HorizontalBoxSlot.h"
 #include "Components/Image.h"
+#include "Components/OverlaySlot.h"
 #include "Components/SceneComponent.h"
 #include "Components/PanelSlot.h"
 #include "Components/PanelWidget.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
+#include "Components/VerticalBoxSlot.h"
 #include "Containers/Set.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -520,6 +523,149 @@ namespace UEAgentRootPanelPrivate
 			return true;
 		}
 
+		return false;
+	}
+	static bool TryReadMarginField(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, FMargin& OutMargin)
+	{
+		if (!JsonObject.IsValid())
+		{
+			return false;
+		}
+
+		const TSharedPtr<FJsonValue> FieldValue = JsonObject->TryGetField(FieldName);
+		if (!FieldValue.IsValid())
+		{
+			return false;
+		}
+
+		if (FieldValue->Type == EJson::Number)
+		{
+			const float Uniform = static_cast<float>(FieldValue->AsNumber());
+			OutMargin = FMargin(Uniform);
+			return true;
+		}
+		if (FieldValue->Type == EJson::Array)
+		{
+			const TArray<TSharedPtr<FJsonValue>>& Values = FieldValue->AsArray();
+			if (Values.Num() == 2)
+			{
+				OutMargin = FMargin(
+					static_cast<float>(Values[0]->AsNumber()),
+					static_cast<float>(Values[1]->AsNumber()));
+				return true;
+			}
+			if (Values.Num() >= 4)
+			{
+				OutMargin = FMargin(
+					static_cast<float>(Values[0]->AsNumber()),
+					static_cast<float>(Values[1]->AsNumber()),
+					static_cast<float>(Values[2]->AsNumber()),
+					static_cast<float>(Values[3]->AsNumber()));
+				return true;
+			}
+		}
+
+		const TSharedPtr<FJsonObject> MarginObject = GetObjectField(JsonObject, FieldName);
+		if (MarginObject.IsValid())
+		{
+			double Left = 0.0;
+			double Top = 0.0;
+			double Right = 0.0;
+			double Bottom = 0.0;
+			if ((TryGetNumberComponent(MarginObject, TEXT("left"), Left) || TryGetNumberComponent(MarginObject, TEXT("Left"), Left))
+				&& (TryGetNumberComponent(MarginObject, TEXT("top"), Top) || TryGetNumberComponent(MarginObject, TEXT("Top"), Top))
+				&& (TryGetNumberComponent(MarginObject, TEXT("right"), Right) || TryGetNumberComponent(MarginObject, TEXT("Right"), Right))
+				&& (TryGetNumberComponent(MarginObject, TEXT("bottom"), Bottom) || TryGetNumberComponent(MarginObject, TEXT("Bottom"), Bottom)))
+			{
+				OutMargin = FMargin(Left, Top, Right, Bottom);
+				return true;
+			}
+		}
+
+		return false;
+	}
+	static FString MarginToOperationString(const FMargin& Margin)
+	{
+		return FString::Printf(
+			TEXT("Left=%s,Top=%s,Right=%s,Bottom=%s"),
+			*FString::SanitizeFloat(Margin.Left),
+			*FString::SanitizeFloat(Margin.Top),
+			*FString::SanitizeFloat(Margin.Right),
+			*FString::SanitizeFloat(Margin.Bottom));
+	}
+	static bool TryParseHorizontalAlignment(const FString& Value, EHorizontalAlignment& OutAlignment)
+	{
+		const FString Normalized = Value.TrimStartAndEnd().ToLower();
+		if (Normalized == TEXT("fill"))
+		{
+			OutAlignment = HAlign_Fill;
+			return true;
+		}
+		if (Normalized == TEXT("left"))
+		{
+			OutAlignment = HAlign_Left;
+			return true;
+		}
+		if (Normalized == TEXT("center") || Normalized == TEXT("centre"))
+		{
+			OutAlignment = HAlign_Center;
+			return true;
+		}
+		if (Normalized == TEXT("right"))
+		{
+			OutAlignment = HAlign_Right;
+			return true;
+		}
+		return false;
+	}
+	static bool TryParseVerticalAlignment(const FString& Value, EVerticalAlignment& OutAlignment)
+	{
+		const FString Normalized = Value.TrimStartAndEnd().ToLower();
+		if (Normalized == TEXT("fill"))
+		{
+			OutAlignment = VAlign_Fill;
+			return true;
+		}
+		if (Normalized == TEXT("top"))
+		{
+			OutAlignment = VAlign_Top;
+			return true;
+		}
+		if (Normalized == TEXT("center") || Normalized == TEXT("centre"))
+		{
+			OutAlignment = VAlign_Center;
+			return true;
+		}
+		if (Normalized == TEXT("bottom"))
+		{
+			OutAlignment = VAlign_Bottom;
+			return true;
+		}
+		return false;
+	}
+	static bool TryReadSlateChildSize(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, FSlateChildSize& OutSize)
+	{
+		const TSharedPtr<FJsonObject> SizeObject = GetObjectField(JsonObject, FieldName);
+		if (!SizeObject.IsValid())
+		{
+			return false;
+		}
+
+		const FString Rule = FirstNonEmptyString(SizeObject, { TEXT("rule"), TEXT("size_rule"), TEXT("type") }).TrimStartAndEnd().ToLower();
+		double Value = 1.0;
+		SizeObject->TryGetNumberField(TEXT("value"), Value);
+		if (Rule == TEXT("auto") || Rule == TEXT("automatic"))
+		{
+			OutSize.SizeRule = ESlateSizeRule::Automatic;
+			OutSize.Value = static_cast<float>(Value);
+			return true;
+		}
+		if (Rule == TEXT("fill"))
+		{
+			OutSize.SizeRule = ESlateSizeRule::Fill;
+			OutSize.Value = static_cast<float>(Value);
+			return true;
+		}
 		return false;
 	}
 	static bool TryReadVectorField(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, FVector& OutVector)
@@ -3056,6 +3202,189 @@ namespace UEAgentRootPanelPrivate
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
 		return ExecutionResult;
 	}
+	static FEditorOperationExecutionResult ExecuteSetUmgSlotLayoutV2(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("UHorizontalBoxSlot/UVerticalBoxSlot/UOverlaySlot layout setters"));
+
+		const FString WidgetBlueprintPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("widget_blueprint_path")));
+		const FString WidgetName = GetScalarFieldAsString(PayloadObject, TEXT("widget_name")).TrimStartAndEnd();
+		const FString SlotType = GetScalarFieldAsString(PayloadObject, TEXT("slot_type")).TrimStartAndEnd();
+		const TSharedPtr<FJsonObject> LayoutObject = GetObjectField(PayloadObject, TEXT("layout"));
+		if (WidgetBlueprintPath.IsEmpty() || WidgetName.IsEmpty() || SlotType.IsEmpty() || !LayoutObject.IsValid())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("widget_blueprint_path, widget_name, slot_type and layout are required."));
+			return ExecutionResult;
+		}
+
+		UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprintAsset(WidgetBlueprintPath);
+		if (WidgetBlueprint == nullptr || WidgetBlueprint->WidgetTree == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_blueprint_not_found"), FString::Printf(TEXT("Widget Blueprint not found: %s"), *WidgetBlueprintPath));
+			return ExecutionResult;
+		}
+
+		UWidget* TargetWidget = nullptr;
+		WidgetBlueprint->WidgetTree->ForEachWidget([&TargetWidget, WidgetName](UWidget* ExistingWidget)
+		{
+			if (ExistingWidget != nullptr && ExistingWidget->GetName().Equals(WidgetName, ESearchCase::IgnoreCase))
+			{
+				TargetWidget = ExistingWidget;
+			}
+		});
+		if (TargetWidget == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_not_found"), WidgetName);
+			return ExecutionResult;
+		}
+
+		UHorizontalBoxSlot* HorizontalSlot = Cast<UHorizontalBoxSlot>(TargetWidget->Slot);
+		UVerticalBoxSlot* VerticalSlot = Cast<UVerticalBoxSlot>(TargetWidget->Slot);
+		UOverlaySlot* OverlaySlot = Cast<UOverlaySlot>(TargetWidget->Slot);
+		const bool bWantsHorizontal = SlotType.Equals(TEXT("HorizontalBoxSlot"), ESearchCase::IgnoreCase);
+		const bool bWantsVertical = SlotType.Equals(TEXT("VerticalBoxSlot"), ESearchCase::IgnoreCase);
+		const bool bWantsOverlay = SlotType.Equals(TEXT("OverlaySlot"), ESearchCase::IgnoreCase);
+		if ((!bWantsHorizontal && !bWantsVertical && !bWantsOverlay)
+			|| (bWantsHorizontal && HorizontalSlot == nullptr)
+			|| (bWantsVertical && VerticalSlot == nullptr)
+			|| (bWantsOverlay && OverlaySlot == nullptr))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_slot_type_mismatch"), FString::Printf(TEXT("Widget `%s` does not have expected slot type `%s`."), *WidgetName, *SlotType));
+			return ExecutionResult;
+		}
+
+		FMargin Padding;
+		const bool bHasPadding = TryReadMarginField(LayoutObject, TEXT("padding"), Padding);
+		EHorizontalAlignment HorizontalAlignment = HAlign_Fill;
+		const FString HorizontalAlignmentText = GetScalarFieldAsString(LayoutObject, TEXT("horizontal_alignment"));
+		const bool bHasHorizontalAlignment = !HorizontalAlignmentText.IsEmpty() && TryParseHorizontalAlignment(HorizontalAlignmentText, HorizontalAlignment);
+		EVerticalAlignment VerticalAlignment = VAlign_Fill;
+		const FString VerticalAlignmentText = GetScalarFieldAsString(LayoutObject, TEXT("vertical_alignment"));
+		const bool bHasVerticalAlignment = !VerticalAlignmentText.IsEmpty() && TryParseVerticalAlignment(VerticalAlignmentText, VerticalAlignment);
+		FSlateChildSize SlotSize;
+		const bool bHasSize = TryReadSlateChildSize(LayoutObject, TEXT("size"), SlotSize);
+		if (!bHasPadding && !bHasHorizontalAlignment && !bHasVerticalAlignment && !bHasSize)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("slot_layout_has_no_supported_fields"), TEXT("layout must contain padding, horizontal_alignment, vertical_alignment, or size."));
+			return ExecutionResult;
+		}
+		if (bHasSize && OverlaySlot != nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("slot_size_not_supported_for_overlay"), TEXT("OverlaySlot does not support FSlateChildSize."));
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Set UMG Slot Layout v2")));
+		WidgetBlueprint->Modify();
+		WidgetBlueprint->WidgetTree->Modify();
+		TargetWidget->Modify();
+		if (TargetWidget->Slot != nullptr)
+		{
+			TargetWidget->Slot->Modify();
+		}
+
+		if (HorizontalSlot != nullptr)
+		{
+			if (bHasPadding)
+			{
+				HorizontalSlot->SetPadding(Padding);
+				SetAppliedField(ExecutionResult.ResultObject, TEXT("padding"), MarginToOperationString(Padding));
+			}
+			if (bHasHorizontalAlignment)
+			{
+				HorizontalSlot->SetHorizontalAlignment(HorizontalAlignment);
+				SetAppliedField(ExecutionResult.ResultObject, TEXT("horizontal_alignment"), HorizontalAlignmentText);
+			}
+			if (bHasVerticalAlignment)
+			{
+				HorizontalSlot->SetVerticalAlignment(VerticalAlignment);
+				SetAppliedField(ExecutionResult.ResultObject, TEXT("vertical_alignment"), VerticalAlignmentText);
+			}
+			if (bHasSize)
+			{
+				HorizontalSlot->SetSize(SlotSize);
+				SetAppliedField(ExecutionResult.ResultObject, TEXT("size"), GetScalarFieldAsString(GetObjectField(LayoutObject, TEXT("size")), TEXT("rule")));
+			}
+		}
+		else if (VerticalSlot != nullptr)
+		{
+			if (bHasPadding)
+			{
+				VerticalSlot->SetPadding(Padding);
+				SetAppliedField(ExecutionResult.ResultObject, TEXT("padding"), MarginToOperationString(Padding));
+			}
+			if (bHasHorizontalAlignment)
+			{
+				VerticalSlot->SetHorizontalAlignment(HorizontalAlignment);
+				SetAppliedField(ExecutionResult.ResultObject, TEXT("horizontal_alignment"), HorizontalAlignmentText);
+			}
+			if (bHasVerticalAlignment)
+			{
+				VerticalSlot->SetVerticalAlignment(VerticalAlignment);
+				SetAppliedField(ExecutionResult.ResultObject, TEXT("vertical_alignment"), VerticalAlignmentText);
+			}
+			if (bHasSize)
+			{
+				VerticalSlot->SetSize(SlotSize);
+				SetAppliedField(ExecutionResult.ResultObject, TEXT("size"), GetScalarFieldAsString(GetObjectField(LayoutObject, TEXT("size")), TEXT("rule")));
+			}
+		}
+		else if (OverlaySlot != nullptr)
+		{
+			if (bHasPadding)
+			{
+				OverlaySlot->SetPadding(Padding);
+				SetAppliedField(ExecutionResult.ResultObject, TEXT("padding"), MarginToOperationString(Padding));
+			}
+			if (bHasHorizontalAlignment)
+			{
+				OverlaySlot->SetHorizontalAlignment(HorizontalAlignment);
+				SetAppliedField(ExecutionResult.ResultObject, TEXT("horizontal_alignment"), HorizontalAlignmentText);
+			}
+			if (bHasVerticalAlignment)
+			{
+				OverlaySlot->SetVerticalAlignment(VerticalAlignment);
+				SetAppliedField(ExecutionResult.ResultObject, TEXT("vertical_alignment"), VerticalAlignmentText);
+			}
+		}
+
+		TargetWidget->PostEditChange();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to revert the slot layout. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_blueprint_path"), WidgetBlueprintPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_name"), WidgetName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("slot_type"), SlotType);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		if (bHasPadding)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("padding"), MarginToOperationString(Padding));
+		}
+		if (bHasHorizontalAlignment)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("horizontal_alignment"), HorizontalAlignmentText);
+		}
+		if (bHasVerticalAlignment)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("vertical_alignment"), VerticalAlignmentText);
+		}
+		if (bHasSize)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("size"), GetScalarFieldAsString(GetObjectField(LayoutObject, TEXT("size")), TEXT("rule")));
+		}
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
+		return ExecutionResult;
+	}
 	static FEditorOperationExecutionResult ExecuteSetUmgWidgetVisibility(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -3998,6 +4327,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("set_umg_widget_layout"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetUmgWidgetLayout);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("set_umg_slot_layout_v2"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetUmgSlotLayoutV2);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("set_umg_widget_visibility"), ESearchCase::IgnoreCase))

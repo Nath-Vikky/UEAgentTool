@@ -144,6 +144,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("layout") },
 		{ TEXT("reason"), TEXT("source_task_id") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("set_umg_slot_layout_v2")),
+		TEXT("set_umg_slot_layout_v2"),
+		TEXT("Set HorizontalBox, VerticalBox, or Overlay slot layout fields after backend Proposal confirmation."),
+		TEXT("umg"),
+		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("slot_type"), TEXT("layout") },
+		{ TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("set_umg_widget_visibility")),
 		TEXT("set_umg_widget_visibility"),
 		TEXT("Set visibility on one UMG widget after backend Proposal confirmation."),
