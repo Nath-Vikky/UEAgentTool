@@ -5723,7 +5723,69 @@ void SAgentRootPanel::SubmitProjectInventorySnapshot(const bool bSilent)
 
 void SAgentRootPanel::ApplyQuickAction(const FUEAgentQuickAction& QuickAction)
 {
-	if (ChatInputBox.IsValid())
+	const TSharedPtr<FJsonObject> PayloadObject = UEAgentRootPanelPrivate::ParseJsonObject(QuickAction.PayloadJson);
+	const FString ActionType = UEAgentRootPanelPrivate::GetScalarFieldAsString(PayloadObject, TEXT("action_type"));
+	if (ActionType.Equals(TEXT("create_workflow_step_proposal"), ESearchCase::IgnoreCase))
+	{
+		const TSharedPtr<FJsonObject> RequestObject = UEAgentRootPanelPrivate::GetObjectField(PayloadObject, TEXT("request"));
+		if (!RequestObject.IsValid())
+		{
+			StateStore->AppendSystemMessage(TEXT("Quick action is missing a workflow step request payload."), TEXT("Quick Action"));
+			return;
+		}
+
+		StateStore->SetBusy(true, FString::Printf(TEXT("Creating workflow proposal: %s"), *QuickAction.Label));
+		HttpClient->CreateWorkflowStepProposal(
+			RequestObject,
+			[StateStore = StateStore, WeakThis = TWeakPtr<SAgentRootPanel>(SharedThis(this))](
+				bool bSuccess,
+				const FString& Message,
+				const FString& RawText,
+				TSharedPtr<FJsonObject> JsonObject)
+		{
+			StateStore->SetBusy(false);
+			if (!bSuccess)
+			{
+				StateStore->ApplyFailure(Message, RawText);
+				return;
+			}
+
+			const TSharedPtr<FJsonObject> ProposalEnvelope = UEAgentRootPanelPrivate::GetObjectField(JsonObject, TEXT("proposal"));
+			const TSharedPtr<FJsonObject> ProposalItem = UEAgentRootPanelPrivate::GetObjectField(ProposalEnvelope, TEXT("item"));
+			if (ProposalItem.IsValid())
+			{
+				TSharedPtr<FJsonObject> SyntheticResponse = MakeShared<FJsonObject>();
+				TSharedPtr<FJsonObject> UserViewObject = MakeShared<FJsonObject>();
+				UserViewObject->SetStringField(TEXT("title"), TEXT("Workflow Proposal Created"));
+				UserViewObject->SetStringField(
+					TEXT("text"),
+					TEXT("A pending Proposal was created from the workflow step. Review and confirm it before UEAgentTool executes anything."));
+				UserViewObject->SetStringField(TEXT("status_hint"), TEXT("waiting_confirmation"));
+
+				TArray<TSharedPtr<FJsonValue>> ProposalValues;
+				ProposalValues.Add(MakeShared<FJsonValueObject>(ProposalItem));
+				SyntheticResponse->SetObjectField(TEXT("user_view"), UserViewObject);
+				SyntheticResponse->SetArrayField(TEXT("action_proposals"), ProposalValues);
+				SyntheticResponse->SetObjectField(TEXT("data"), JsonObject.IsValid() ? JsonObject : MakeShared<FJsonObject>());
+				SyntheticResponse->SetStringField(
+					TEXT("assistant_message"),
+					TEXT("Workflow step Proposal created. Please review the Proposal card before execution."));
+				StateStore->ApplyUnifiedResponse(SyntheticResponse);
+			}
+			else
+			{
+				StateStore->SetStatusMessage(TEXT("Workflow step Proposal created. Refreshing proposal list..."));
+			}
+
+			if (const TSharedPtr<SAgentRootPanel> This = WeakThis.Pin())
+			{
+				This->RefreshTaskData();
+			}
+		});
+		return;
+	}
+
+	if (ChatInputBox.IsValid() && !QuickAction.SuggestedInput.IsEmpty())
 	{
 		ChatInputBox->SetText(FText::FromString(QuickAction.SuggestedInput));
 	}

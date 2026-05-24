@@ -32,6 +32,16 @@
 
 中文问题可以直接询问英文 UE 概念，例如“actor 的生命周期是什么”“增强输入怎么写”。后端会做轻量中英检索扩展，前端不需要额外切换。
 
+Workflow quick actions:
+- When Agent Chat returns a multi-step editor workflow, ready steps can appear
+  as quick-action buttons in User View.
+- Clicking `Create Proposal: ...` sends one ready workflow step to the backend
+  and creates one pending Proposal.
+- The button does not execute editor writes directly. You still need to review
+  the Proposal card and click `Confirm & Execute in UE`.
+- If the backend rejects the step because required fields are missing, the
+  normal failure message is shown and no editor operation is executed.
+
 ## Code Review
 
 1. 切换到 `Code Review`。
