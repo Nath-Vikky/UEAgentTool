@@ -193,6 +193,8 @@ Blueprint graph operations now report richer result data back to the backend:
 
 These fields help the backend create safer follow-up Proposals, for example a pin-connection repair suggestion. They do not execute follow-up edits automatically.
 
+When the backend returns `editor_operation_result_summary` or `editor_operation_follow_ups` blocks, User View now expands the most useful fields into readable bullet points: execution state, Blueprint path, graph name, created node count, linked pin count, compile status, diagnostic flags, repair advice, and ready follow-up candidate counts. The full JSON is still available in Debug View.
+
 ## Highlights Window
 
 User View 不再直接把 summary、issues、recommendations 等高亮信息塞进主聊天区域。任务完成后，主面板只显示一条结果摘要，点击“打开高亮”可在独立窗口查看完整高亮内容。

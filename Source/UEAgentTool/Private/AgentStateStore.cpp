@@ -879,6 +879,198 @@ namespace UEAgentStateStorePrivate
 		}
 	}
 
+	static FString JoinJsonArrayAsText(const TSharedPtr<FJsonObject>& JsonObject, const FString& FieldName, const int32 MaxItems = 6)
+	{
+		const TArray<TSharedPtr<FJsonValue>> Values = GetArrayField(JsonObject, FieldName);
+		if (Values.Num() == 0)
+		{
+			return FString();
+		}
+
+		TArray<FString> Parts;
+		for (const TSharedPtr<FJsonValue>& Value : Values)
+		{
+			if (!Value.IsValid())
+			{
+				continue;
+			}
+
+			FString Text;
+			if (Value->Type == EJson::String)
+			{
+				Text = Value->AsString();
+			}
+			else if (Value->Type == EJson::Number)
+			{
+				Text = FString::SanitizeFloat(Value->AsNumber());
+			}
+			else if (Value->Type == EJson::Boolean)
+			{
+				Text = Value->AsBool() ? TEXT("true") : TEXT("false");
+			}
+			else if (Value->Type == EJson::Object)
+			{
+				Text = BuildBlockItemSummary(Value);
+			}
+
+			Text.TrimStartAndEndInline();
+			if (!Text.IsEmpty())
+			{
+				Parts.Add(Text);
+			}
+			if (Parts.Num() >= MaxItems)
+			{
+				break;
+			}
+		}
+
+		if (Values.Num() > MaxItems)
+		{
+			Parts.Add(FString::Printf(TEXT("+%d more"), Values.Num() - MaxItems));
+		}
+		return FString::Join(Parts, TEXT(", "));
+	}
+
+	static void EnrichEditorOperationResultBlock(FUEAgentUserViewBlock& Block, const TSharedPtr<FJsonObject>& SummaryObject, const FString& LanguageCode = TEXT("zh-CN"))
+	{
+		if (!IsBlockType(Block, TEXT("editor_operation_result_summary")))
+		{
+			return;
+		}
+		if (Block.Title.IsEmpty())
+		{
+			Block.Title = GetLocalizedUiText(LanguageCode, TEXT("Editor Operation Result"), TEXT("Editor Operation Result"));
+		}
+		if (!SummaryObject.IsValid())
+		{
+			return;
+		}
+
+		const TSharedPtr<FJsonObject> DiagnosticsObject = GetObjectField(SummaryObject, TEXT("operation_diagnostics"));
+		const TSharedPtr<FJsonObject> RepairAdviceObject = GetObjectField(SummaryObject, TEXT("repair_advice")).IsValid()
+			? GetObjectField(SummaryObject, TEXT("repair_advice"))
+			: GetObjectField(DiagnosticsObject, TEXT("repair_advice"));
+
+		AddUniqueBlockItem(Block.Items, FString::Printf(TEXT("Execution: %s | Success: %s"),
+			*GetScalarFieldAsString(SummaryObject, TEXT("execution_state")),
+			*GetScalarFieldAsString(SummaryObject, TEXT("success"))));
+
+		const FString OperationType = GetStringOrDefault(DiagnosticsObject, TEXT("operation_type"));
+		const FString BlueprintPath = GetStringOrDefault(DiagnosticsObject, TEXT("blueprint_path"));
+		const FString GraphName = GetStringOrDefault(DiagnosticsObject, TEXT("graph_name"));
+		if (!OperationType.IsEmpty())
+		{
+			AddUniqueBlockItem(Block.Items, FString::Printf(TEXT("Operation: %s"), *OperationType));
+		}
+		if (!BlueprintPath.IsEmpty())
+		{
+			AddUniqueBlockItem(Block.Items, FString::Printf(TEXT("Blueprint: %s"), *BlueprintPath));
+		}
+		if (!GraphName.IsEmpty())
+		{
+			AddUniqueBlockItem(Block.Items, FString::Printf(TEXT("Graph: %s"), *GraphName));
+		}
+		if (DiagnosticsObject.IsValid())
+		{
+			AddUniqueBlockItem(Block.Items, FString::Printf(TEXT("Created nodes: %s | Linked pins: %s | Compile: %s"),
+				*GetScalarFieldAsString(DiagnosticsObject, TEXT("created_node_count")),
+				*GetScalarFieldAsString(DiagnosticsObject, TEXT("linked_pin_count")),
+				*GetStringOrDefault(DiagnosticsObject, TEXT("compile_status"), TEXT("n/a"))));
+
+			const FString DiagnosticFlags = JoinJsonArrayAsText(DiagnosticsObject, TEXT("diagnostic_flags"));
+			if (!DiagnosticFlags.IsEmpty())
+			{
+				AddUniqueBlockItem(Block.Items, FString::Printf(TEXT("Diagnostic flags: %s"), *DiagnosticFlags));
+			}
+		}
+
+		const FString DirtyPackages = JoinJsonArrayAsText(SummaryObject, TEXT("dirty_packages"));
+		if (!DirtyPackages.IsEmpty())
+		{
+			AddUniqueBlockItem(Block.Items, FString::Printf(TEXT("Dirty packages: %s"), *DirtyPackages));
+		}
+
+		if (RepairAdviceObject.IsValid())
+		{
+			AddUniqueBlockItem(Block.Items, FString::Printf(TEXT("Repair advice: %s | Severity: %s"),
+				*GetStringOrDefault(RepairAdviceObject, TEXT("status"), TEXT("n/a")),
+				*GetStringOrDefault(RepairAdviceObject, TEXT("severity"), TEXT("n/a"))));
+
+			const TArray<TSharedPtr<FJsonValue>> Actions = GetArrayField(RepairAdviceObject, TEXT("actions"));
+			for (int32 Index = 0; Index < Actions.Num() && Index < 3; ++Index)
+			{
+				const TSharedPtr<FJsonObject> ActionObject = Actions[Index].IsValid() ? Actions[Index]->AsObject() : nullptr;
+				if (!ActionObject.IsValid())
+				{
+					continue;
+				}
+				const FString Title = GetStringOrDefault(ActionObject, TEXT("title"));
+				const FString NextStep = GetStringOrDefault(ActionObject, TEXT("next_step"));
+				if (!Title.IsEmpty() || !NextStep.IsEmpty())
+				{
+					AddUniqueBlockItem(Block.Items, FString::Printf(TEXT("Repair %d: %s%s%s"),
+						Index + 1,
+						*Title,
+						!Title.IsEmpty() && !NextStep.IsEmpty() ? TEXT(" -> ") : TEXT(""),
+						*NextStep));
+				}
+			}
+		}
+	}
+
+	static void EnrichEditorOperationFollowUpsBlock(FUEAgentUserViewBlock& Block, const TSharedPtr<FJsonObject>& FollowUpObject, const FString& LanguageCode = TEXT("zh-CN"))
+	{
+		if (!IsBlockType(Block, TEXT("editor_operation_follow_ups")))
+		{
+			return;
+		}
+		if (Block.Title.IsEmpty())
+		{
+			Block.Title = GetLocalizedUiText(LanguageCode, TEXT("Follow-up Candidates"), TEXT("Follow-up Candidates"));
+		}
+		if (!FollowUpObject.IsValid())
+		{
+			return;
+		}
+
+		AddUniqueBlockItem(Block.Items, FString::Printf(TEXT("Status: %s | Ready: %s/%s"),
+			*GetStringOrDefault(FollowUpObject, TEXT("status"), TEXT("n/a")),
+			*GetScalarFieldAsString(FollowUpObject, TEXT("ready_candidate_count")),
+			*GetScalarFieldAsString(FollowUpObject, TEXT("candidate_count"))));
+
+		const FString DiagnosticFlags = JoinJsonArrayAsText(FollowUpObject, TEXT("diagnostic_flags"));
+		if (!DiagnosticFlags.IsEmpty())
+		{
+			AddUniqueBlockItem(Block.Items, FString::Printf(TEXT("Diagnostic flags: %s"), *DiagnosticFlags));
+		}
+
+		const TArray<TSharedPtr<FJsonValue>> Candidates = GetArrayField(FollowUpObject, TEXT("candidates"));
+		for (int32 Index = 0; Index < Candidates.Num() && Index < 4; ++Index)
+		{
+			const TSharedPtr<FJsonObject> CandidateObject = Candidates[Index].IsValid() ? Candidates[Index]->AsObject() : nullptr;
+			if (!CandidateObject.IsValid())
+			{
+				continue;
+			}
+
+			const FString CandidateId = GetStringOrDefault(CandidateObject, TEXT("candidate_id"), FString::Printf(TEXT("candidate_%d"), Index + 1));
+			const FString OperationType = GetStringOrDefault(CandidateObject, TEXT("operation_type"));
+			const FString Ready = GetScalarFieldAsString(CandidateObject, TEXT("proposal_ready"));
+			const FString Reason = GetStringOrDefault(CandidateObject, TEXT("reason"));
+			const FString MissingInputs = JoinJsonArrayAsText(CandidateObject, TEXT("missing_inputs"));
+			AddUniqueBlockItem(Block.Items, FString::Printf(TEXT("Candidate: %s | %s | ready=%s%s%s"),
+				*CandidateId,
+				*OperationType,
+				*Ready,
+				MissingInputs.IsEmpty() ? TEXT("") : TEXT(" | missing="),
+				*MissingInputs));
+			if (!Reason.IsEmpty())
+			{
+				AddUniqueBlockItem(Block.Items, FString::Printf(TEXT("Reason: %s"), *Reason));
+			}
+		}
+	}
+
 	static FString GetLlmAnalysisField(const TSharedPtr<FJsonObject>& AnalysisObject, const FString& FieldName)
 	{
 		const FString DirectValue = GetStringOrDefault(AnalysisObject, FieldName);
@@ -1797,6 +1989,8 @@ void FUEAgentStateStore::ApplyUserViewProjectionResponse(const TSharedPtr<FJsonO
 		Block.Items = UEAgentStateStorePrivate::ExtractBlockItems(DataObject, UiLanguage);
 		Block.JsonPreview = DataObject.IsValid() ? UEAgentStateStorePrivate::JsonToPrettyString(DataObject) : FString();
 		UEAgentStateStorePrivate::EnrichLlmAnalysisBlock(Block, DataObject, UiLanguage);
+		UEAgentStateStorePrivate::EnrichEditorOperationResultBlock(Block, DataObject, UiLanguage);
+		UEAgentStateStorePrivate::EnrichEditorOperationFollowUpsBlock(Block, DataObject, UiLanguage);
 		LastResult.Blocks.Add(Block);
 	}
 	UEAgentStateStorePrivate::MoveBlockAfterSummary(LastResult.Blocks, TEXT("llm_analysis"));
@@ -2006,6 +2200,8 @@ void FUEAgentStateStore::ApplyUnifiedResponse(const TSharedPtr<FJsonObject>& Res
 		Block.Items = UEAgentStateStorePrivate::ExtractBlockItems(BlockDataObject, UiLanguage);
 		Block.JsonPreview = BlockDataObject.IsValid() ? UEAgentStateStorePrivate::JsonToPrettyString(BlockDataObject) : FString();
 		UEAgentStateStorePrivate::EnrichLlmAnalysisBlock(Block, BlockDataObject, UiLanguage);
+		UEAgentStateStorePrivate::EnrichEditorOperationResultBlock(Block, BlockDataObject, UiLanguage);
+		UEAgentStateStorePrivate::EnrichEditorOperationFollowUpsBlock(Block, BlockDataObject, UiLanguage);
 		LastResult.Blocks.Add(Block);
 	}
 
