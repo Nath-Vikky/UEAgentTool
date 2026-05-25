@@ -182,6 +182,17 @@ Inventory snapshot 会尽量补充 Blueprint 的 `parent_class/components/variab
 
 如果想验证聊天恢复链路，先发起几轮 Agent Chat，再点击 `Restore Session`。恢复后的聊天顺序应与后端 history 保持一致，而不是按本地时间重新排序。
 
+## Blueprint Graph Result Details
+
+Blueprint graph operations now report richer result data back to the backend:
+
+- `created_nodes[]` and `linked_nodes[]` include stable `node_id`, `node_name`, `node_class`, node title, position, and role.
+- `linked_pins[]` includes source/target pin metadata such as `pin_id`, `pin_name`, direction, and pin type.
+- `linked_pin_summaries[]` contains display-friendly strings.
+- `add_blueprint_node_template` also reports `created_node_id` and, when an entry event is used, `entry_node_id`.
+
+These fields help the backend create safer follow-up Proposals, for example a pin-connection repair suggestion. They do not execute follow-up edits automatically.
+
 ## Highlights Window
 
 User View 不再直接把 summary、issues、recommendations 等高亮信息塞进主聊天区域。任务完成后，主面板只显示一条结果摘要，点击“打开高亮”可在独立窗口查看完整高亮内容。

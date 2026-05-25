@@ -28,6 +28,7 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraphSchema_K2.h"
 #include "Editor.h"
 #include "Engine/Blueprint.h"
@@ -62,6 +63,7 @@
 #include "Materials/MaterialInstanceConstant.h"
 #include "MaterialShared.h"
 #include "Misc/PackageName.h"
+#include "Misc/Guid.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "PhysicsEngine/BodySetup.h"
@@ -298,6 +300,24 @@ namespace UEAgentRootPanelPrivate
 		}
 
 		ArrayValues.Add(MakeShared<FJsonValueString>(Value));
+		ResultObject->SetArrayField(FieldName, ArrayValues);
+	}
+
+	static void AddResultObjectArrayItem(TSharedPtr<FJsonObject>& ResultObject, const FString& FieldName, const TSharedPtr<FJsonObject>& Value)
+	{
+		if (!Value.IsValid())
+		{
+			return;
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ArrayValues;
+		const TArray<TSharedPtr<FJsonValue>>* ExistingValues = nullptr;
+		if (ResultObject->TryGetArrayField(FieldName, ExistingValues) && ExistingValues != nullptr)
+		{
+			ArrayValues = *ExistingValues;
+		}
+
+		ArrayValues.Add(MakeShared<FJsonValueObject>(Value));
 		ResultObject->SetArrayField(FieldName, ArrayValues);
 	}
 
@@ -725,6 +745,82 @@ namespace UEAgentRootPanelPrivate
 			TypeText += FString::Printf(TEXT(":%s"), *PinType.PinSubCategoryObject->GetPathName());
 		}
 		return TypeText;
+	}
+
+	static FString PinDirectionToOperationString(const EEdGraphPinDirection Direction)
+	{
+		return Direction == EGPD_Input ? TEXT("input") : TEXT("output");
+	}
+
+	static FString BlueprintNodeGuidString(const UEdGraphNode* Node)
+	{
+		return Node != nullptr ? Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens) : FString();
+	}
+
+	static FString BlueprintPinGuidString(const UEdGraphPin* Pin)
+	{
+		return Pin != nullptr ? Pin->PinId.ToString(EGuidFormats::DigitsWithHyphens) : FString();
+	}
+
+	static TSharedPtr<FJsonObject> MakeBlueprintNodeResultObject(const UEdGraphNode* Node, const FString& Role)
+	{
+		if (Node == nullptr)
+		{
+			return nullptr;
+		}
+
+		TSharedPtr<FJsonObject> NodeObject = MakeShared<FJsonObject>();
+		NodeObject->SetStringField(TEXT("node_id"), BlueprintNodeGuidString(Node));
+		NodeObject->SetStringField(TEXT("node_name"), Node->GetName());
+		NodeObject->SetStringField(TEXT("node_class"), Node->GetClass() != nullptr ? Node->GetClass()->GetName() : TEXT("unknown"));
+		NodeObject->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+		NodeObject->SetNumberField(TEXT("x"), Node->NodePosX);
+		NodeObject->SetNumberField(TEXT("y"), Node->NodePosY);
+		if (!Role.IsEmpty())
+		{
+			NodeObject->SetStringField(TEXT("role"), Role);
+		}
+		return NodeObject;
+	}
+
+	static void AddBlueprintNodeResult(TSharedPtr<FJsonObject>& ResultObject, const FString& FieldName, const UEdGraphNode* Node, const FString& Role)
+	{
+		AddResultObjectArrayItem(ResultObject, FieldName, MakeBlueprintNodeResultObject(Node, Role));
+	}
+
+	static TSharedPtr<FJsonObject> MakeBlueprintPinResultObject(const UEdGraphNode* Node, const UEdGraphPin* Pin)
+	{
+		if (Node == nullptr || Pin == nullptr)
+		{
+			return nullptr;
+		}
+
+		TSharedPtr<FJsonObject> PinObject = MakeShared<FJsonObject>();
+		PinObject->SetStringField(TEXT("node_id"), BlueprintNodeGuidString(Node));
+		PinObject->SetStringField(TEXT("node_name"), Node->GetName());
+		PinObject->SetStringField(TEXT("pin_id"), BlueprintPinGuidString(Pin));
+		PinObject->SetStringField(TEXT("pin_name"), Pin->PinName.ToString());
+		PinObject->SetStringField(TEXT("direction"), PinDirectionToOperationString(Pin->Direction));
+		PinObject->SetStringField(TEXT("pin_type"), PinTypeToOperationString(Pin->PinType));
+		return PinObject;
+	}
+
+	static TSharedPtr<FJsonObject> MakeBlueprintPinLinkResultObject(UEdGraphNode* SourceNode, UEdGraphPin* SourcePin, UEdGraphNode* TargetNode, UEdGraphPin* TargetPin)
+	{
+		if (SourceNode == nullptr || SourcePin == nullptr || TargetNode == nullptr || TargetPin == nullptr)
+		{
+			return nullptr;
+		}
+
+		TSharedPtr<FJsonObject> LinkObject = MakeShared<FJsonObject>();
+		LinkObject->SetStringField(TEXT("summary"), FString::Printf(TEXT("%s.%s -> %s.%s"),
+			*SourceNode->GetName(),
+			*SourcePin->PinName.ToString(),
+			*TargetNode->GetName(),
+			*TargetPin->PinName.ToString()));
+		LinkObject->SetObjectField(TEXT("source"), MakeBlueprintPinResultObject(SourceNode, SourcePin));
+		LinkObject->SetObjectField(TEXT("target"), MakeBlueprintPinResultObject(TargetNode, TargetPin));
+		return LinkObject;
 	}
 
 	static UBlueprint* LoadBlueprintAsset(const FString& BlueprintPath)
@@ -2337,6 +2433,7 @@ namespace UEAgentRootPanelPrivate
 			}
 		}
 		TArray<FString> LinkedPinsSummaries;
+		TArray<TSharedPtr<FJsonObject>> LinkedPinObjects;
 		auto FindExecPin = [](UEdGraphNode* Node, const EEdGraphPinDirection Direction, const FName PreferredName) -> UEdGraphPin*
 		{
 			if (Node == nullptr)
@@ -2359,7 +2456,7 @@ namespace UEAgentRootPanelPrivate
 			}
 			return nullptr;
 		};
-		auto ConnectExecPins = [&TargetGraph, &LinkedPinsSummaries](UEdGraphNode* SourceNode, UEdGraphPin* SourcePin, UEdGraphNode* TargetNode, UEdGraphPin* TargetPin) -> bool
+		auto ConnectExecPins = [&TargetGraph, &LinkedPinsSummaries, &LinkedPinObjects](UEdGraphNode* SourceNode, UEdGraphPin* SourcePin, UEdGraphNode* TargetNode, UEdGraphPin* TargetPin) -> bool
 		{
 			if (SourceNode == nullptr || SourcePin == nullptr || TargetNode == nullptr || TargetPin == nullptr)
 			{
@@ -2384,6 +2481,7 @@ namespace UEAgentRootPanelPrivate
 					*SourcePin->PinName.ToString(),
 					*TargetNode->GetName(),
 					*TargetPin->PinName.ToString()));
+				LinkedPinObjects.Add(MakeBlueprintPinLinkResultObject(SourceNode, SourcePin, TargetNode, TargetPin));
 			}
 			return bLinked;
 		};
@@ -2506,6 +2604,26 @@ namespace UEAgentRootPanelPrivate
 		ExecutionResult.ResultObject->SetStringField(TEXT("template_id"), TemplateId);
 		ExecutionResult.ResultObject->SetStringField(TEXT("graph_name"), TargetGraph->GetName());
 		ExecutionResult.ResultObject->SetStringField(TEXT("created_node_name"), PrimaryCreatedNodeName);
+		if (CallNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("created_node_id"), BlueprintNodeGuidString(CallNode));
+		}
+		else if (VariableSetNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("created_node_id"), BlueprintNodeGuidString(VariableSetNode));
+		}
+		else if (VariableGetNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("created_node_id"), BlueprintNodeGuidString(VariableGetNode));
+		}
+		else if (FunctionCallNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("created_node_id"), BlueprintNodeGuidString(FunctionCallNode));
+		}
+		else if (EnhancedInputActionNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("created_node_id"), BlueprintNodeGuidString(EnhancedInputActionNode));
+		}
 		ExecutionResult.ResultObject->SetStringField(TEXT("compile_status"), CompileStatus);
 		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
 		ExecutionResult.ResultObject->SetBoolField(TEXT("compiled_after_edit"), bCompileAfterEdit);
@@ -2515,12 +2633,12 @@ namespace UEAgentRootPanelPrivate
 		{
 			ExecutionResult.ResultObject->SetStringField(TEXT("branch_path"), BranchPath);
 			ExecutionResult.ResultObject->SetBoolField(TEXT("condition_default"), bConditionDefault);
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), BranchNode->GetName());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("created_nodes"), BranchNode, TEXT("branch"));
 		}
 		if (SequenceNode != nullptr)
 		{
 			ExecutionResult.ResultObject->SetNumberField(TEXT("sequence_output_count"), PrintNodes.Num());
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), SequenceNode->GetName());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("created_nodes"), SequenceNode, TEXT("sequence"));
 			for (const FString& SequenceMessage : SequenceMessages)
 			{
 				AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("messages"), SequenceMessage);
@@ -2530,63 +2648,65 @@ namespace UEAgentRootPanelPrivate
 		{
 			ExecutionResult.ResultObject->SetStringField(TEXT("variable_name"), VariableName);
 			ExecutionResult.ResultObject->SetStringField(TEXT("variable_scope"), TEXT("self"));
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), VariableGetNode->GetName());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("created_nodes"), VariableGetNode, TEXT("variable_get"));
 		}
 		if (VariableSetNode != nullptr)
 		{
 			ExecutionResult.ResultObject->SetStringField(TEXT("variable_name"), VariableName);
 			ExecutionResult.ResultObject->SetStringField(TEXT("variable_scope"), TEXT("self"));
 			ExecutionResult.ResultObject->SetStringField(TEXT("variable_value"), VariableValue);
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), VariableSetNode->GetName());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("created_nodes"), VariableSetNode, TEXT("variable_set"));
 		}
 		if (FunctionCallNode != nullptr)
 		{
 			ExecutionResult.ResultObject->SetStringField(TEXT("function_name"), FunctionName);
 			ExecutionResult.ResultObject->SetStringField(TEXT("function_target"), TEXT("self"));
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), FunctionCallNode->GetName());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("created_nodes"), FunctionCallNode, TEXT("function_call"));
 		}
 		if (EnhancedInputActionNode != nullptr)
 		{
 			ExecutionResult.ResultObject->SetStringField(TEXT("input_action_path"), InputActionPath);
 			ExecutionResult.ResultObject->SetStringField(TEXT("input_action_name"), InputAction != nullptr ? InputAction->GetName() : FString());
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), EnhancedInputActionNode->GetName());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("created_nodes"), EnhancedInputActionNode, TEXT("enhanced_input_action_event"));
 		}
 		if (CallNode != nullptr)
 		{
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), CallNode->GetName());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("created_nodes"), CallNode, TEXT("print_string"));
 		}
 		for (int32 NodeIndex = 1; NodeIndex < PrintNodes.Num(); ++NodeIndex)
 		{
 			if (PrintNodes[NodeIndex] != nullptr)
 			{
-				AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), PrintNodes[NodeIndex]->GetName());
+				AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("created_nodes"), PrintNodes[NodeIndex], TEXT("print_string"));
 			}
 		}
 		if (bCreatedEntryEvent && EntryEventNode != nullptr)
 		{
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("created_nodes"), EntryEventNode->GetName());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("created_nodes"), EntryEventNode, TEXT("entry_event"));
 		}
 		if (EntryEventNode != nullptr)
 		{
 			ExecutionResult.ResultObject->SetStringField(TEXT("entry_event"), EntryEventName);
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), EntryEventNode->GetName());
+			ExecutionResult.ResultObject->SetStringField(TEXT("entry_node_id"), BlueprintNodeGuidString(EntryEventNode));
+			ExecutionResult.ResultObject->SetStringField(TEXT("entry_node_name"), EntryEventNode->GetName());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), EntryEventNode, TEXT("entry_event"));
 			SetAppliedField(ExecutionResult.ResultObject, TEXT("entry_event"), EntryEventName);
 		}
 		if (BranchNode != nullptr)
 		{
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), BranchNode->GetName());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), BranchNode, TEXT("branch"));
 		}
 		if (SequenceNode != nullptr)
 		{
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), SequenceNode->GetName());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), SequenceNode, TEXT("sequence"));
 		}
 		if (VariableSetNode != nullptr && EntryEventNode != nullptr)
 		{
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), VariableSetNode->GetName());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), VariableSetNode, TEXT("variable_set"));
 		}
 		if (FunctionCallNode != nullptr && EntryEventNode != nullptr)
 		{
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), FunctionCallNode->GetName());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), FunctionCallNode, TEXT("function_call"));
 		}
 		if (EntryEventNode != nullptr || BranchNode != nullptr || SequenceNode != nullptr)
 		{
@@ -2594,13 +2714,17 @@ namespace UEAgentRootPanelPrivate
 			{
 				if (PrintNode != nullptr)
 				{
-					AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), PrintNode->GetName());
+					AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), PrintNode, TEXT("print_string"));
 				}
 			}
 		}
+		for (const TSharedPtr<FJsonObject>& LinkedPinObject : LinkedPinObjects)
+		{
+			AddResultObjectArrayItem(ExecutionResult.ResultObject, TEXT("linked_pins"), LinkedPinObject);
+		}
 		for (const FString& LinkedPinsSummary : LinkedPinsSummaries)
 		{
-			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_pins"), LinkedPinsSummary);
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_pin_summaries"), LinkedPinsSummary);
 		}
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), Blueprint->GetOutermost() != nullptr ? Blueprint->GetOutermost()->GetName() : FString());
 		SetAppliedField(ExecutionResult.ResultObject, TEXT("template_id"), TemplateId);
@@ -2862,17 +2986,22 @@ namespace UEAgentRootPanelPrivate
 		ExecutionResult.UndoHint = TEXT("Use editor Undo to remove the created Blueprint pin link. The package is marked dirty but not auto-saved.");
 		ExecutionResult.ResultObject->SetStringField(TEXT("blueprint_path"), BlueprintPath);
 		ExecutionResult.ResultObject->SetStringField(TEXT("graph_name"), TargetGraph->GetName());
-		ExecutionResult.ResultObject->SetStringField(TEXT("source_node_id"), SourceNodeId);
+		ExecutionResult.ResultObject->SetStringField(TEXT("source_node_id"), BlueprintNodeGuidString(SourceNode));
+		ExecutionResult.ResultObject->SetStringField(TEXT("source_node_name"), SourceNode->GetName());
 		ExecutionResult.ResultObject->SetStringField(TEXT("source_pin_name"), SourcePinName);
-		ExecutionResult.ResultObject->SetStringField(TEXT("target_node_id"), TargetNodeId);
+		ExecutionResult.ResultObject->SetStringField(TEXT("source_pin_id"), BlueprintPinGuidString(SourcePin));
+		ExecutionResult.ResultObject->SetStringField(TEXT("target_node_id"), BlueprintNodeGuidString(TargetNode));
+		ExecutionResult.ResultObject->SetStringField(TEXT("target_node_name"), TargetNode->GetName());
 		ExecutionResult.ResultObject->SetStringField(TEXT("target_pin_name"), TargetPinName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("target_pin_id"), BlueprintPinGuidString(TargetPin));
 		ExecutionResult.ResultObject->SetStringField(TEXT("compile_status"), CompileStatus);
 		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
 		ExecutionResult.ResultObject->SetBoolField(TEXT("compiled_after_edit"), bCompileAfterEdit);
 		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), Blueprint->GetOutermost() != nullptr && Blueprint->GetOutermost()->IsDirty());
-		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), SourceNode->GetName());
-		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_nodes"), TargetNode->GetName());
-		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_pins"), LinkSummary);
+		AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), SourceNode, TEXT("source"));
+		AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), TargetNode, TEXT("target"));
+		AddResultObjectArrayItem(ExecutionResult.ResultObject, TEXT("linked_pins"), MakeBlueprintPinLinkResultObject(SourceNode, SourcePin, TargetNode, TargetPin));
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("linked_pin_summaries"), LinkSummary);
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), Blueprint->GetOutermost() != nullptr ? Blueprint->GetOutermost()->GetName() : FString());
 		SetAppliedField(ExecutionResult.ResultObject, TEXT("source_pin_name"), SourcePinName);
 		SetAppliedField(ExecutionResult.ResultObject, TEXT("target_pin_name"), TargetPinName);
