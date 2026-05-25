@@ -41,6 +41,10 @@ Workflow quick actions:
   the Proposal card and click `Confirm & Execute in UE`.
 - If the backend rejects the step because required fields are missing, the
   normal failure message is shown and no editor operation is executed.
+- After a confirmed editor operation reports diagnostics, User View can also
+  show follow-up quick actions such as `Create Follow-up Proposal:
+  connect_blueprint_nodes`. These follow the same rule: they create a pending
+  Proposal only, and you must confirm it before any UE edit runs.
 
 ## Code Review
 

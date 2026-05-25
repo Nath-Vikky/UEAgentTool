@@ -5660,7 +5660,21 @@ void SAgentRootPanel::ExecuteAndReportEditorOperation(const TSharedPtr<FUEAgentP
 				return;
 			}
 
-			if (JsonObject.IsValid())
+			const bool bHasUserView = UEAgentRootPanelPrivate::GetObjectField(JsonObject, TEXT("user_view")).IsValid();
+			if (bHasUserView)
+			{
+				if (!UEAgentRootPanelPrivate::GetObjectField(JsonObject, TEXT("task")).IsValid())
+				{
+					TSharedPtr<FJsonObject> TaskObject = MakeShared<FJsonObject>();
+					TaskObject->SetStringField(TEXT("task_type"), TEXT("editor_operation_result"));
+					TaskObject->SetStringField(TEXT("status"), TEXT("completed"));
+					TaskObject->SetStringField(TEXT("finish_reason"), TEXT("completed"));
+					TaskObject->SetBoolField(TEXT("output_complete"), true);
+					JsonObject->SetObjectField(TEXT("task"), TaskObject);
+				}
+				StateStore->ApplyUnifiedResponse(JsonObject);
+			}
+			else if (JsonObject.IsValid())
 			{
 				StateStore->SetStatusMessage(TEXT("Editor operation result reported to backend."));
 			}
@@ -5668,7 +5682,10 @@ void SAgentRootPanel::ExecuteAndReportEditorOperation(const TSharedPtr<FUEAgentP
 			if (const TSharedPtr<SAgentRootPanel> This = WeakThis.Pin())
 			{
 				This->RefreshTaskData();
-				This->ReloadCurrentResultDetail();
+				if (!bHasUserView)
+				{
+					This->ReloadCurrentResultDetail();
+				}
 			}
 		});
 }
@@ -5755,7 +5772,12 @@ void SAgentRootPanel::ApplyQuickAction(const FUEAgentQuickAction& QuickAction)
 			if (ProposalItem.IsValid())
 			{
 				TSharedPtr<FJsonObject> SyntheticResponse = MakeShared<FJsonObject>();
+				TSharedPtr<FJsonObject> TaskObject = MakeShared<FJsonObject>();
 				TSharedPtr<FJsonObject> UserViewObject = MakeShared<FJsonObject>();
+				TaskObject->SetStringField(TEXT("task_type"), TEXT("editor_workflow_step_proposal"));
+				TaskObject->SetStringField(TEXT("status"), TEXT("waiting_confirmation"));
+				TaskObject->SetStringField(TEXT("finish_reason"), TEXT("waiting_confirmation"));
+				TaskObject->SetBoolField(TEXT("output_complete"), true);
 				UserViewObject->SetStringField(TEXT("title"), TEXT("Workflow Proposal Created"));
 				UserViewObject->SetStringField(
 					TEXT("text"),
@@ -5764,6 +5786,7 @@ void SAgentRootPanel::ApplyQuickAction(const FUEAgentQuickAction& QuickAction)
 
 				TArray<TSharedPtr<FJsonValue>> ProposalValues;
 				ProposalValues.Add(MakeShared<FJsonValueObject>(ProposalItem));
+				SyntheticResponse->SetObjectField(TEXT("task"), TaskObject);
 				SyntheticResponse->SetObjectField(TEXT("user_view"), UserViewObject);
 				SyntheticResponse->SetArrayField(TEXT("action_proposals"), ProposalValues);
 				SyntheticResponse->SetObjectField(TEXT("data"), JsonObject.IsValid() ? JsonObject : MakeShared<FJsonObject>());
@@ -5775,6 +5798,74 @@ void SAgentRootPanel::ApplyQuickAction(const FUEAgentQuickAction& QuickAction)
 			else
 			{
 				StateStore->SetStatusMessage(TEXT("Workflow step Proposal created. Refreshing proposal list..."));
+			}
+
+			if (const TSharedPtr<SAgentRootPanel> This = WeakThis.Pin())
+			{
+				This->RefreshTaskData();
+			}
+		});
+		return;
+	}
+
+	if (ActionType.Equals(TEXT("create_editor_operation_follow_up_proposal"), ESearchCase::IgnoreCase))
+	{
+		const FString SourceProposalId = UEAgentRootPanelPrivate::GetScalarFieldAsString(PayloadObject, TEXT("source_proposal_id"));
+		const TSharedPtr<FJsonObject> RequestObject = UEAgentRootPanelPrivate::GetObjectField(PayloadObject, TEXT("request"));
+		if (SourceProposalId.IsEmpty() || !RequestObject.IsValid())
+		{
+			StateStore->AppendSystemMessage(TEXT("Quick action is missing follow-up proposal payload."), TEXT("Quick Action"));
+			return;
+		}
+
+		StateStore->SetBusy(true, FString::Printf(TEXT("Creating follow-up proposal: %s"), *QuickAction.Label));
+		HttpClient->CreateEditorOperationFollowUpProposal(
+			SourceProposalId,
+			RequestObject,
+			[StateStore = StateStore, WeakThis = TWeakPtr<SAgentRootPanel>(SharedThis(this))](
+				bool bSuccess,
+				const FString& Message,
+				const FString& RawText,
+				TSharedPtr<FJsonObject> JsonObject)
+		{
+			StateStore->SetBusy(false);
+			if (!bSuccess)
+			{
+				StateStore->ApplyFailure(Message, RawText);
+				return;
+			}
+
+			const TSharedPtr<FJsonObject> ProposalEnvelope = UEAgentRootPanelPrivate::GetObjectField(JsonObject, TEXT("proposal"));
+			const TSharedPtr<FJsonObject> ProposalItem = UEAgentRootPanelPrivate::GetObjectField(ProposalEnvelope, TEXT("item"));
+			if (ProposalItem.IsValid())
+			{
+				TSharedPtr<FJsonObject> SyntheticResponse = MakeShared<FJsonObject>();
+				TSharedPtr<FJsonObject> TaskObject = MakeShared<FJsonObject>();
+				TSharedPtr<FJsonObject> UserViewObject = MakeShared<FJsonObject>();
+				TaskObject->SetStringField(TEXT("task_type"), TEXT("editor_operation_follow_up"));
+				TaskObject->SetStringField(TEXT("status"), TEXT("waiting_confirmation"));
+				TaskObject->SetStringField(TEXT("finish_reason"), TEXT("waiting_confirmation"));
+				TaskObject->SetBoolField(TEXT("output_complete"), true);
+				UserViewObject->SetStringField(TEXT("title"), TEXT("Follow-up Proposal Created"));
+				UserViewObject->SetStringField(
+					TEXT("text"),
+					TEXT("A pending follow-up Proposal was created. Review and confirm it before UEAgentTool executes anything."));
+				UserViewObject->SetStringField(TEXT("status_hint"), TEXT("waiting_confirmation"));
+
+				TArray<TSharedPtr<FJsonValue>> ProposalValues;
+				ProposalValues.Add(MakeShared<FJsonValueObject>(ProposalItem));
+				SyntheticResponse->SetObjectField(TEXT("task"), TaskObject);
+				SyntheticResponse->SetObjectField(TEXT("user_view"), UserViewObject);
+				SyntheticResponse->SetArrayField(TEXT("action_proposals"), ProposalValues);
+				SyntheticResponse->SetObjectField(TEXT("data"), JsonObject.IsValid() ? JsonObject : MakeShared<FJsonObject>());
+				SyntheticResponse->SetStringField(
+					TEXT("assistant_message"),
+					TEXT("Follow-up Proposal created. Please review the Proposal card before execution."));
+				StateStore->ApplyUnifiedResponse(SyntheticResponse);
+			}
+			else
+			{
+				StateStore->SetStatusMessage(TEXT("Follow-up Proposal created. Refreshing proposal list..."));
 			}
 
 			if (const TSharedPtr<SAgentRootPanel> This = WeakThis.Pin())

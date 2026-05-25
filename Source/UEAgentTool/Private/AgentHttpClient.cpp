@@ -371,6 +371,18 @@ void FUEAgentHttpClient::CreateWorkflowStepProposal(const TSharedPtr<FJsonObject
 		Callback);
 }
 
+void FUEAgentHttpClient::CreateEditorOperationFollowUpProposal(
+	const FString& ProposalId,
+	const TSharedPtr<FJsonObject>& RequestObject,
+	const FJsonResponseCallback& Callback) const
+{
+	SendRequest(
+		TEXT("POST"),
+		FString::Printf(TEXT("/api/v1/editor-operations/proposals/%s/follow-ups/proposal"), *ProposalId),
+		RequestObject.IsValid() ? RequestObject : MakeShared<FJsonObject>(),
+		Callback);
+}
+
 void FUEAgentHttpClient::ConfirmEditorOperationProposal(const FString& ProposalId, const FJsonResponseCallback& Callback) const
 {
 	SendRequest(TEXT("POST"), FString::Printf(TEXT("/api/v1/editor-operations/proposals/%s/confirm"), *ProposalId), MakeShared<FJsonObject>(), Callback);
