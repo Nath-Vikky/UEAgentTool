@@ -91,7 +91,7 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		TEXT("Add one whitelisted Blueprint node template after backend Proposal confirmation."),
 		TEXT("blueprint"),
 		{ TEXT("blueprint_path"), TEXT("template_id") },
-		{ TEXT("graph_name"), TEXT("message"), TEXT("duration"), TEXT("print_to_screen"), TEXT("print_to_log"), TEXT("entry_event"), TEXT("input_action_path"), TEXT("node_position"), TEXT("node_comment"), TEXT("compile_after_edit") }));
+		{ TEXT("graph_name"), TEXT("message"), TEXT("duration"), TEXT("delay_seconds"), TEXT("print_to_screen"), TEXT("print_to_log"), TEXT("entry_event"), TEXT("input_action_path"), TEXT("node_position"), TEXT("node_comment"), TEXT("compile_after_edit") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("connect_blueprint_nodes")),
 		TEXT("connect_blueprint_nodes"),

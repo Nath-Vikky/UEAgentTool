@@ -1970,11 +1970,12 @@ namespace UEAgentRootPanelPrivate
 		const bool bIsPrintStringTemplate = TemplateId.Equals(TEXT("print_string"), ESearchCase::IgnoreCase);
 		const bool bIsBranchPrintStringTemplate = TemplateId.Equals(TEXT("branch_print_string"), ESearchCase::IgnoreCase);
 		const bool bIsSequencePrintStringsTemplate = TemplateId.Equals(TEXT("sequence_print_strings"), ESearchCase::IgnoreCase);
+		const bool bIsDelayPrintStringTemplate = TemplateId.Equals(TEXT("delay_print_string"), ESearchCase::IgnoreCase);
 		const bool bIsGetVariableTemplate = TemplateId.Equals(TEXT("get_variable"), ESearchCase::IgnoreCase);
 		const bool bIsSetVariableTemplate = TemplateId.Equals(TEXT("set_variable"), ESearchCase::IgnoreCase);
 		const bool bIsCallFunctionTemplate = TemplateId.Equals(TEXT("call_function"), ESearchCase::IgnoreCase);
 		const bool bIsEnhancedInputActionEventTemplate = TemplateId.Equals(TEXT("enhanced_input_action_event"), ESearchCase::IgnoreCase);
-		const bool bUsesPrintString = bIsPrintStringTemplate || bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate;
+		const bool bUsesPrintString = bIsPrintStringTemplate || bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate || bIsDelayPrintStringTemplate;
 		TArray<FString> SequenceMessages;
 		const TArray<TSharedPtr<FJsonValue>>* MessageValues = nullptr;
 		if (PayloadObject.IsValid() && PayloadObject->TryGetArrayField(TEXT("messages"), MessageValues) && MessageValues != nullptr)
@@ -1999,6 +2000,8 @@ namespace UEAgentRootPanelPrivate
 		}
 		double DurationSeconds = 2.0;
 		PayloadObject->TryGetNumberField(TEXT("duration"), DurationSeconds);
+		double DelaySeconds = 1.0;
+		PayloadObject->TryGetNumberField(TEXT("delay_seconds"), DelaySeconds);
 		if (GraphName.IsEmpty())
 		{
 			GraphName = TEXT("EventGraph");
@@ -2009,10 +2012,10 @@ namespace UEAgentRootPanelPrivate
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("blueprint_path and template_id are required."));
 			return ExecutionResult;
 		}
-		if (!bIsPrintStringTemplate && !bIsBranchPrintStringTemplate && !bIsSequencePrintStringsTemplate && !bIsGetVariableTemplate && !bIsSetVariableTemplate && !bIsCallFunctionTemplate && !bIsEnhancedInputActionEventTemplate)
+		if (!bIsPrintStringTemplate && !bIsBranchPrintStringTemplate && !bIsSequencePrintStringsTemplate && !bIsDelayPrintStringTemplate && !bIsGetVariableTemplate && !bIsSetVariableTemplate && !bIsCallFunctionTemplate && !bIsEnhancedInputActionEventTemplate)
 		{
 			ExecutionResult.ExecutionState = TEXT("blocked");
-			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string, branch_print_string, sequence_print_strings, get_variable, set_variable, call_function, and enhanced_input_action_event are supported in v1."));
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string, branch_print_string, sequence_print_strings, delay_print_string, get_variable, set_variable, call_function, and enhanced_input_action_event are supported in v1."));
 			return ExecutionResult;
 		}
 		if ((bIsGetVariableTemplate || bIsSetVariableTemplate) && VariableName.IsEmpty())
@@ -2256,6 +2259,7 @@ namespace UEAgentRootPanelPrivate
 		}
 
 		TArray<UK2Node_CallFunction*> PrintNodes;
+		UK2Node_CallFunction* DelayNode = nullptr;
 		UK2Node_CallFunction* CallNode = nullptr;
 		UK2Node_CallFunction* FunctionCallNode = nullptr;
 		UK2Node_EnhancedInputAction* EnhancedInputActionNode = nullptr;
@@ -2358,6 +2362,30 @@ namespace UEAgentRootPanelPrivate
 			EnhancedInputActionNode->PostPlacedNewNode();
 			EnhancedInputActionNode->AllocateDefaultPins();
 		}
+		if (bIsDelayPrintStringTemplate)
+		{
+			DelayNode = NewObject<UK2Node_CallFunction>(TargetGraph);
+			DelayNode->SetFlags(RF_Transactional);
+			DelayNode->FunctionReference.SetExternalMember(
+				GET_FUNCTION_NAME_CHECKED(UKismetSystemLibrary, Delay),
+				UKismetSystemLibrary::StaticClass());
+			DelayNode->CreateNewGuid();
+			DelayNode->PostPlacedNewNode();
+			DelayNode->AllocateDefaultPins();
+			DelayNode->NodePosX = static_cast<int32>(NodePosition.X);
+			DelayNode->NodePosY = static_cast<int32>(NodePosition.Y);
+			if (!NodeComment.IsEmpty())
+			{
+				DelayNode->NodeComment = NodeComment;
+				DelayNode->bCommentBubblePinned = true;
+				DelayNode->bCommentBubbleVisible = true;
+			}
+			if (UEdGraphPin* DurationPin = DelayNode->FindPin(TEXT("Duration")))
+			{
+				DurationPin->DefaultValue = FString::SanitizeFloat(DelaySeconds);
+			}
+			TargetGraph->AddNode(DelayNode, true, true);
+		}
 		if (bUsesPrintString)
 		{
 			CallNode = NewObject<UK2Node_CallFunction>(TargetGraph);
@@ -2369,7 +2397,7 @@ namespace UEAgentRootPanelPrivate
 			CallNode->PostPlacedNewNode();
 			CallNode->AllocateDefaultPins();
 
-			CallNode->NodePosX = static_cast<int32>((bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate) ? NodePosition.X + 360.0 : NodePosition.X);
+			CallNode->NodePosX = static_cast<int32>((bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate || bIsDelayPrintStringTemplate) ? NodePosition.X + 360.0 : NodePosition.X);
 			CallNode->NodePosY = static_cast<int32>(NodePosition.Y);
 			if (!NodeComment.IsEmpty())
 			{
@@ -2531,6 +2559,25 @@ namespace UEAgentRootPanelPrivate
 				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay -> Sequence -> PrintString failed."));
 			}
 		}
+		else if (bIsDelayPrintStringTemplate)
+		{
+			UEdGraphPin* DelayInputPin = FindExecPin(DelayNode, EGPD_Input, UEdGraphSchema_K2::PN_Execute);
+			UEdGraphPin* DelayOutputPin = FindExecPin(DelayNode, EGPD_Output, FName(TEXT("Completed")));
+			UEdGraphPin* PrintInputPin = FindExecPin(CallNode, EGPD_Input, UEdGraphSchema_K2::PN_Execute);
+			bool bEntryToDelayLinked = EntryEventName.IsEmpty();
+			if (EntryEventNode != nullptr)
+			{
+				UEdGraphPin* EntryOutputPin = FindExecPin(EntryEventNode, EGPD_Output, UEdGraphSchema_K2::PN_Then);
+				bEntryToDelayLinked = ConnectExecPins(EntryEventNode, EntryOutputPin, DelayNode, DelayInputPin);
+			}
+			const bool bDelayToPrintLinked = ConnectExecPins(DelayNode, DelayOutputPin, CallNode, PrintInputPin);
+			bTemplateLinkSuccess = bEntryToDelayLinked && bDelayToPrintLinked;
+			if (!bTemplateLinkSuccess)
+			{
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay -> Delay -> PrintString exec chain."));
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay -> Delay -> PrintString failed."));
+			}
+		}
 		else if (bIsPrintStringTemplate && EntryEventNode != nullptr)
 		{
 			UEdGraphPin* SourceExecPin = FindExecPin(EntryEventNode, EGPD_Output, UEdGraphSchema_K2::PN_Then);
@@ -2644,6 +2691,11 @@ namespace UEAgentRootPanelPrivate
 				AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("messages"), SequenceMessage);
 			}
 		}
+		if (DelayNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetNumberField(TEXT("delay_seconds"), DelaySeconds);
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("created_nodes"), DelayNode, TEXT("delay"));
+		}
 		if (VariableGetNode != nullptr)
 		{
 			ExecutionResult.ResultObject->SetStringField(TEXT("variable_name"), VariableName);
@@ -2700,6 +2752,10 @@ namespace UEAgentRootPanelPrivate
 		{
 			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), SequenceNode, TEXT("sequence"));
 		}
+		if (DelayNode != nullptr)
+		{
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), DelayNode, TEXT("delay"));
+		}
 		if (VariableSetNode != nullptr && EntryEventNode != nullptr)
 		{
 			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), VariableSetNode, TEXT("variable_set"));
@@ -2708,7 +2764,7 @@ namespace UEAgentRootPanelPrivate
 		{
 			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), FunctionCallNode, TEXT("function_call"));
 		}
-		if (EntryEventNode != nullptr || BranchNode != nullptr || SequenceNode != nullptr)
+		if (EntryEventNode != nullptr || BranchNode != nullptr || SequenceNode != nullptr || DelayNode != nullptr)
 		{
 			for (UK2Node_CallFunction* PrintNode : PrintNodes)
 			{
@@ -2760,6 +2816,10 @@ namespace UEAgentRootPanelPrivate
 		if (SequenceNode != nullptr)
 		{
 			SetAppliedField(ExecutionResult.ResultObject, TEXT("sequence_output_count"), FString::FromInt(PrintNodes.Num()));
+		}
+		if (DelayNode != nullptr)
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("delay_seconds"), FString::SanitizeFloat(DelaySeconds));
 		}
 		if (!bCompileSuccess)
 		{
