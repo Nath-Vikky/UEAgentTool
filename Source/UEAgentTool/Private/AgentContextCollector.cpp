@@ -194,6 +194,134 @@ namespace UEAgentContextCollectorPrivate
 		}
 	}
 
+	static FString GraphPinDirectionToString(const EEdGraphPinDirection Direction)
+	{
+		switch (Direction)
+		{
+		case EGPD_Input:
+			return TEXT("input");
+		case EGPD_Output:
+			return TEXT("output");
+		default:
+			return TEXT("unknown");
+		}
+	}
+
+	static TSharedPtr<FJsonObject> MakeGraphNodeInventoryObject(const UEdGraphNode* Node)
+	{
+		TSharedPtr<FJsonObject> NodeObject = MakeShared<FJsonObject>();
+		if (Node == nullptr)
+		{
+			return NodeObject;
+		}
+
+		NodeObject->SetStringField(TEXT("node_id"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+		NodeObject->SetStringField(TEXT("node_name"), Node->GetName());
+		NodeObject->SetStringField(TEXT("node_class"), Node->GetClass() != nullptr ? Node->GetClass()->GetName() : TEXT("unknown"));
+		NodeObject->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+		NodeObject->SetNumberField(TEXT("x"), Node->NodePosX);
+		NodeObject->SetNumberField(TEXT("y"), Node->NodePosY);
+		if (!Node->NodeComment.IsEmpty())
+		{
+			NodeObject->SetStringField(TEXT("comment"), Node->NodeComment);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> PinValues;
+		int32 InputPinCount = 0;
+		int32 OutputPinCount = 0;
+		int32 LinkCount = 0;
+		for (const UEdGraphPin* Pin : Node->Pins)
+		{
+			if (Pin == nullptr)
+			{
+				continue;
+			}
+			if (Pin->Direction == EGPD_Input)
+			{
+				++InputPinCount;
+			}
+			else if (Pin->Direction == EGPD_Output)
+			{
+				++OutputPinCount;
+			}
+			LinkCount += Pin->LinkedTo.Num();
+
+			TSharedPtr<FJsonObject> PinObject = MakeShared<FJsonObject>();
+			PinObject->SetStringField(TEXT("pin_id"), Pin->PinId.ToString(EGuidFormats::DigitsWithHyphens));
+			PinObject->SetStringField(TEXT("pin_name"), Pin->PinName.ToString());
+			PinObject->SetStringField(TEXT("direction"), GraphPinDirectionToString(Pin->Direction));
+			PinObject->SetStringField(TEXT("pin_type"), PinTypeToInventoryString(Pin->PinType));
+			PinObject->SetNumberField(TEXT("linked_to_count"), Pin->LinkedTo.Num());
+			PinValues.Add(MakeShared<FJsonValueObject>(PinObject));
+			if (PinValues.Num() >= 16)
+			{
+				break;
+			}
+		}
+
+		NodeObject->SetNumberField(TEXT("pin_count"), Node->Pins.Num());
+		NodeObject->SetNumberField(TEXT("input_pin_count"), InputPinCount);
+		NodeObject->SetNumberField(TEXT("output_pin_count"), OutputPinCount);
+		NodeObject->SetNumberField(TEXT("link_count"), LinkCount);
+		NodeObject->SetArrayField(TEXT("pins"), PinValues);
+		return NodeObject;
+	}
+
+	static void AddGraphInventorySummaries(
+		const TArray<TObjectPtr<UEdGraph>>& Graphs,
+		const FString& GraphType,
+		TArray<TSharedPtr<FJsonValue>>& OutGraphValues)
+	{
+		for (const TObjectPtr<UEdGraph>& Graph : Graphs)
+		{
+			if (Graph == nullptr)
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> GraphObject = MakeShared<FJsonObject>();
+			GraphObject->SetStringField(TEXT("graph_id"), Graph->GraphGuid.ToString(EGuidFormats::DigitsWithHyphens));
+			GraphObject->SetStringField(TEXT("graph_name"), Graph->GetName());
+			GraphObject->SetStringField(TEXT("graph_type"), GraphType);
+			GraphObject->SetNumberField(TEXT("node_count"), Graph->Nodes.Num());
+
+			TArray<TSharedPtr<FJsonValue>> NodeValues;
+			int32 PinCount = 0;
+			int32 LinkCount = 0;
+			for (const UEdGraphNode* Node : Graph->Nodes)
+			{
+				if (Node == nullptr)
+				{
+					continue;
+				}
+				PinCount += Node->Pins.Num();
+				for (const UEdGraphPin* Pin : Node->Pins)
+				{
+					if (Pin != nullptr)
+					{
+						LinkCount += Pin->LinkedTo.Num();
+					}
+				}
+				NodeValues.Add(MakeShared<FJsonValueObject>(MakeGraphNodeInventoryObject(Node)));
+				if (NodeValues.Num() >= 32)
+				{
+					break;
+				}
+			}
+
+			GraphObject->SetNumberField(TEXT("pin_count"), PinCount);
+			GraphObject->SetNumberField(TEXT("link_count"), LinkCount);
+			GraphObject->SetNumberField(TEXT("max_nodes_returned"), 32);
+			GraphObject->SetNumberField(TEXT("max_pins_per_node"), 16);
+			GraphObject->SetArrayField(TEXT("nodes"), NodeValues);
+			OutGraphValues.Add(MakeShared<FJsonValueObject>(GraphObject));
+			if (OutGraphValues.Num() >= 32)
+			{
+				break;
+			}
+		}
+	}
+
 	static void AddStaticMeshInventoryDetails(const UStaticMesh* StaticMesh, const TSharedPtr<FJsonObject>& SettingsObject)
 	{
 		if (StaticMesh == nullptr)
@@ -280,12 +408,17 @@ namespace UEAgentContextCollectorPrivate
 #if WITH_EDITORONLY_DATA
 		TArray<FString> FunctionNames;
 		TArray<FString> GraphNames;
+		TArray<TSharedPtr<FJsonValue>> GraphSummaryValues;
 		AddGraphNames(Blueprint->FunctionGraphs, FunctionNames);
 		AddGraphNames(Blueprint->UbergraphPages, GraphNames);
 		AddGraphNames(Blueprint->FunctionGraphs, GraphNames);
 		AddGraphNames(Blueprint->MacroGraphs, GraphNames);
+		AddGraphInventorySummaries(Blueprint->UbergraphPages, TEXT("event"), GraphSummaryValues);
+		AddGraphInventorySummaries(Blueprint->FunctionGraphs, TEXT("function"), GraphSummaryValues);
+		AddGraphInventorySummaries(Blueprint->MacroGraphs, TEXT("macro"), GraphSummaryValues);
 		BlueprintObject->SetArrayField(TEXT("functions"), MakeStringArray(FunctionNames, 64));
 		BlueprintObject->SetArrayField(TEXT("graphs"), MakeStringArray(GraphNames, 96));
+		BlueprintObject->SetArrayField(TEXT("graph_summaries"), GraphSummaryValues);
 
 		TArray<FString> InterfaceNames;
 		for (const FBPInterfaceDescription& InterfaceDescription : Blueprint->ImplementedInterfaces)

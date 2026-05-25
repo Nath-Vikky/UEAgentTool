@@ -175,7 +175,7 @@ Editor Operation Bridge 的能力查询结果在 Monitor 的 `editor_operation_c
 
 打开插件面板时，UEAgentTool 会自动静默提交一次 Project Inventory；如果后端当时未启动，自动提交会跳过，用户仍可在 Debug View 顶部点击 `Submit Inventory` 手动重试。`Submit Inventory` 会扫描当前工程的 Asset Registry 资产和 `Source/Plugins` 代码摘要，并提交到 `POST /api/v1/project-inventory/snapshot`。这用于让 Project QA 回答项目事实问题，例如工程里有哪些资产、某类资产设置、某个 Blueprint 有哪些组件/变量/函数/图表、某模块有哪些代码文件。插件不会解析 `.uasset` 二进制，也不会修改资产。
 
-Inventory snapshot 会尽量补充 Blueprint 的 `parent_class/components/variables/functions/graphs/interfaces/editor_flags`，Static Mesh 的 `nanite_enabled/lod_count/collision_complexity/lightmap_resolution`，以及代码文件的 `classes/symbols/modified_at`。
+Inventory snapshot 会尽量补充 Blueprint 的 `parent_class/components/variables/functions/graphs/graph_summaries/interfaces/editor_flags`，Static Mesh 的 `nanite_enabled/lod_count/collision_complexity/lightmap_resolution`，以及代码文件的 `classes/symbols/modified_at`。`graph_summaries[]` 是只读图表摘要，包含 graph 名称、类型、节点数、pin 数、link 数，以及有上限的节点/pin 样本；它用于让 Agent Chat 回答“这个蓝图图表里有哪些节点”这类项目事实问题，而不是让 LLM 凭知识库猜。
 
 当前版本还会把编辑器当前 World 中已加载关卡的 Actor 摘要提交到 `level_actors[]`，包括 `actor_label/actor_class/level_name/blueprint_path/transform/components/tags/mobility`；同时会把 Material Instance 摘要提交到 `material_instances[]`，包括 `parent_material/scalar_parameters/vector_parameters/texture_parameters/static_switch_parameters`。因此 Agent Chat / Project QA 可以在提交快照后回答“当前关卡有哪些 Actor”“某个材质实例有哪些参数”这类项目事实问题。插件仍然不会解析 `.uasset` 二进制，也不会修改资产。
 
