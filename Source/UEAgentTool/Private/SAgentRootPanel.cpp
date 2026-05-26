@@ -5530,6 +5530,108 @@ void SAgentRootPanel::ReloadCurrentResultDetail()
 	LoadTaskDetail(CurrentTask);
 }
 
+void SAgentRootPanel::ShowBlueprintGraphInventory()
+{
+	StateStore->SetBusy(true, TEXT("Loading Blueprint graph inventory..."));
+	HttpClient->RequestBlueprintGraphs(20, true, [StateStore = StateStore](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	{
+		StateStore->SetBusy(false);
+		if (!bSuccess || !JsonObject.IsValid())
+		{
+			StateStore->AppendSystemMessage(FString::Printf(TEXT("Blueprint graph inventory unavailable: %s"), *Message), TEXT("Blueprint Graphs"));
+			return;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* ItemValues = nullptr;
+		if (!JsonObject->TryGetArrayField(TEXT("items"), ItemValues) || ItemValues == nullptr)
+		{
+			const TSharedPtr<FJsonObject> DataObject = UEAgentRootPanelPrivate::GetObjectField(JsonObject, TEXT("data"));
+			if (!DataObject.IsValid() || !DataObject->TryGetArrayField(TEXT("items"), ItemValues) || ItemValues == nullptr)
+			{
+				StateStore->AppendSystemMessage(TEXT("No Blueprint graph inventory items were returned. Submit or auto-sync Project Inventory first."), TEXT("Blueprint Graphs"));
+				return;
+			}
+		}
+
+		TArray<FString> Lines;
+		Lines.Add(FString::Printf(TEXT("Blueprint Graph Inventory (%d graphs)"), ItemValues->Num()));
+		const TArray<const TCHAR*> NodeTitleFields = { TEXT("title"), TEXT("node_name"), TEXT("node_id") };
+		int32 DisplayedCount = 0;
+		for (const TSharedPtr<FJsonValue>& ItemValue : *ItemValues)
+		{
+			const TSharedPtr<FJsonObject> ItemObject = ItemValue.IsValid() ? ItemValue->AsObject() : nullptr;
+			if (!ItemObject.IsValid())
+			{
+				continue;
+			}
+
+			const FString AssetName = UEAgentRootPanelPrivate::GetScalarFieldAsString(ItemObject, TEXT("asset_name"));
+			const FString AssetPath = UEAgentRootPanelPrivate::GetScalarFieldAsString(ItemObject, TEXT("asset_path"));
+			const FString GraphName = UEAgentRootPanelPrivate::GetScalarFieldAsString(ItemObject, TEXT("graph_name"));
+			int32 NodeCount = 0;
+			int32 PinCount = 0;
+			int32 LinkCount = 0;
+			UEAgentRootPanelPrivate::TryGetIntegerField(ItemObject, TEXT("node_count"), NodeCount);
+			UEAgentRootPanelPrivate::TryGetIntegerField(ItemObject, TEXT("pin_count"), PinCount);
+			UEAgentRootPanelPrivate::TryGetIntegerField(ItemObject, TEXT("link_count"), LinkCount);
+
+			TArray<FString> NodeTitles;
+			const TArray<TSharedPtr<FJsonValue>>* NodeValues = nullptr;
+			if (ItemObject->TryGetArrayField(TEXT("nodes"), NodeValues) && NodeValues != nullptr)
+			{
+				for (const TSharedPtr<FJsonValue>& NodeValue : *NodeValues)
+				{
+					const TSharedPtr<FJsonObject> NodeObject = NodeValue.IsValid() ? NodeValue->AsObject() : nullptr;
+					if (!NodeObject.IsValid())
+					{
+						continue;
+					}
+					const FString NodeTitle = UEAgentRootPanelPrivate::FirstNonEmptyString(NodeObject, NodeTitleFields);
+					if (!NodeTitle.IsEmpty())
+					{
+						NodeTitles.Add(NodeTitle);
+					}
+					if (NodeTitles.Num() >= 3)
+					{
+						break;
+					}
+				}
+			}
+
+			const FString TargetName = !AssetName.IsEmpty() ? AssetName : AssetPath;
+			const FString DisplayGraphName = GraphName.IsEmpty() ? FString(TEXT("Graph")) : GraphName;
+			Lines.Add(FString::Printf(TEXT("- %s.%s: %d nodes, %d pins, %d links"),
+				*TargetName,
+				*DisplayGraphName,
+				NodeCount,
+				PinCount,
+				LinkCount));
+			if (NodeTitles.Num() > 0)
+			{
+				Lines.Add(FString::Printf(TEXT("  nodes: %s"), *FString::Join(NodeTitles, TEXT(", "))));
+			}
+
+			++DisplayedCount;
+			if (DisplayedCount >= 10)
+			{
+				break;
+			}
+		}
+
+		if (DisplayedCount == 0)
+		{
+			Lines.Add(TEXT("No graph summaries were found in the latest Project Inventory snapshot."));
+		}
+		else if (ItemValues->Num() > DisplayedCount)
+		{
+			Lines.Add(FString::Printf(TEXT("...and %d more graphs. Ask Agent Chat for a filtered list if needed."), ItemValues->Num() - DisplayedCount));
+		}
+
+		StateStore->AppendSystemMessage(FString::Join(Lines, TEXT("\n")), TEXT("Blueprint Graphs"));
+		StateStore->SetStatusMessage(FString::Printf(TEXT("Loaded %d Blueprint graph summaries."), ItemValues->Num()));
+	});
+}
+
 void SAgentRootPanel::RefreshKnowledgeBaseStatus() const
 {
 	HttpClient->RequestKnowledgeBaseStatus([StateStore = StateStore](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
@@ -7561,6 +7663,35 @@ TSharedRef<SWidget> SAgentRootPanel::BuildFunctionSpecificForm(const EUEAgentFun
 				.Text(FText::FromString(TEXT("Use the bottom input for project questions or general agent chat. Routing is decided by the backend.")))
 				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
 				.AutoWrapText(true)
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 6.0f, 0.0f, 0.0f)
+			[
+				SNew(SWrapBox)
+				.UseAllottedWidth(true)
+				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Sync Inventory Now")))
+					.ToolTipText(FText::FromString(TEXT("Submit a fresh Project Inventory snapshot. The plugin also auto-syncs once when opened.")))
+					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+					.OnClicked_Lambda([this]()
+					{
+						SubmitProjectInventorySnapshot(false);
+						return FReply::Handled();
+					})
+				]
+				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Show Blueprint Graphs")))
+					.ToolTipText(FText::FromString(TEXT("Read the latest backend Project Inventory and show Blueprint graph/node summaries in chat.")))
+					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+					.OnClicked_Lambda([this]()
+					{
+						ShowBlueprintGraphInventory();
+						return FReply::Handled();
+					})
+				]
 			];
 
 	case EUEAgentFunctionType::CodeReview:
