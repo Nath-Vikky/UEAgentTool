@@ -5532,8 +5532,34 @@ void SAgentRootPanel::ReloadCurrentResultDetail()
 
 void SAgentRootPanel::ShowBlueprintGraphInventory()
 {
-	StateStore->SetBusy(true, TEXT("Loading Blueprint graph inventory..."));
-	HttpClient->RequestBlueprintGraphs(20, true, [StateStore = StateStore](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	RefreshEditorContext();
+	const FUEAgentContextSummary Context = StateStore->GetEditorContext();
+	FString BlueprintQuery;
+	for (const FUEAgentAssetContextItem& AssetItem : Context.SelectedAssetItems)
+	{
+		if (AssetItem.AssetType.Contains(TEXT("Blueprint"), ESearchCase::IgnoreCase))
+		{
+			BlueprintQuery = AssetItem.AssetName;
+			break;
+		}
+	}
+	if (BlueprintQuery.IsEmpty())
+	{
+		for (const FString& SelectedAssetPath : Context.SelectedAssets)
+		{
+			if (SelectedAssetPath.Contains(TEXT("BP_"), ESearchCase::IgnoreCase)
+				|| SelectedAssetPath.Contains(TEXT("Blueprint"), ESearchCase::IgnoreCase))
+			{
+				BlueprintQuery = UEAgentRootPanelPrivate::GetAssetNameFromPackagePath(UEAgentRootPanelPrivate::NormalizeAssetPackagePath(SelectedAssetPath));
+				break;
+			}
+		}
+	}
+
+	StateStore->SetBusy(true, BlueprintQuery.IsEmpty()
+		? TEXT("Loading Blueprint graph inventory...")
+		: FString::Printf(TEXT("Loading Blueprint graph inventory for %s..."), *BlueprintQuery));
+	HttpClient->RequestBlueprintGraphs(BlueprintQuery, 20, true, [StateStore = StateStore, BlueprintQuery](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
 	{
 		StateStore->SetBusy(false);
 		if (!bSuccess || !JsonObject.IsValid())
@@ -5554,7 +5580,9 @@ void SAgentRootPanel::ShowBlueprintGraphInventory()
 		}
 
 		TArray<FString> Lines;
-		Lines.Add(FString::Printf(TEXT("Blueprint Graph Inventory (%d graphs)"), ItemValues->Num()));
+		Lines.Add(BlueprintQuery.IsEmpty()
+			? FString::Printf(TEXT("Blueprint Graph Inventory (%d graphs)"), ItemValues->Num())
+			: FString::Printf(TEXT("Blueprint Graph Inventory for %s (%d graphs)"), *BlueprintQuery, ItemValues->Num()));
 		const TArray<const TCHAR*> NodeTitleFields = { TEXT("title"), TEXT("node_name"), TEXT("node_id") };
 		int32 DisplayedCount = 0;
 		for (const TSharedPtr<FJsonValue>& ItemValue : *ItemValues)
@@ -5620,7 +5648,9 @@ void SAgentRootPanel::ShowBlueprintGraphInventory()
 
 		if (DisplayedCount == 0)
 		{
-			Lines.Add(TEXT("No graph summaries were found in the latest Project Inventory snapshot."));
+			Lines.Add(BlueprintQuery.IsEmpty()
+				? TEXT("No graph summaries were found in the latest Project Inventory snapshot.")
+				: FString::Printf(TEXT("No graph summaries matched `%s` in the latest Project Inventory snapshot."), *BlueprintQuery));
 		}
 		else if (ItemValues->Num() > DisplayedCount)
 		{

@@ -7,6 +7,7 @@
 #include "Dom/JsonValue.h"
 #include "HttpModule.h"
 #include "Interfaces/IHttpResponse.h"
+#include "GenericPlatform/GenericPlatformHttp.h"
 #include "Internationalization/Culture.h"
 #include "Internationalization/Internationalization.h"
 #include "Misc/Paths.h"
@@ -296,11 +297,17 @@ void FUEAgentHttpClient::SubmitProjectInventorySnapshot(const TSharedPtr<FJsonOb
 	SendRequest(TEXT("POST"), TEXT("/api/v1/project-inventory/snapshot"), SnapshotObject, Callback);
 }
 
-void FUEAgentHttpClient::RequestBlueprintGraphs(const int32 Limit, const bool bIncludeNodes, const FJsonResponseCallback& Callback) const
+void FUEAgentHttpClient::RequestBlueprintGraphs(const FString& BlueprintQuery, const int32 Limit, const bool bIncludeNodes, const FJsonResponseCallback& Callback) const
 {
 	const int32 SafeLimit = FMath::Clamp(Limit, 1, 100);
 	const FString IncludeNodes = bIncludeNodes ? TEXT("true") : TEXT("false");
-	SendRequest(TEXT("GET"), FString::Printf(TEXT("/api/v1/project-inventory/blueprint-graphs?include_nodes=%s&limit=%d"), *IncludeNodes, SafeLimit), nullptr, Callback);
+	FString RelativePath = FString::Printf(TEXT("/api/v1/project-inventory/blueprint-graphs?include_nodes=%s&limit=%d"), *IncludeNodes, SafeLimit);
+	const FString CleanQuery = BlueprintQuery.TrimStartAndEnd();
+	if (!CleanQuery.IsEmpty())
+	{
+		RelativePath += FString::Printf(TEXT("&blueprint_query=%s"), *FGenericPlatformHttp::UrlEncode(CleanQuery));
+	}
+	SendRequest(TEXT("GET"), RelativePath, nullptr, Callback);
 }
 
 void FUEAgentHttpClient::RequestTaskDetail(const FString& TaskId, const FJsonResponseCallback& Callback) const
