@@ -37,6 +37,7 @@ private:
 	void RefreshProjectionDataForCurrentResult() const;
 	void RefreshTraceDataForCurrentResult() const;
 	void ReloadCurrentResultDetail();
+	void ShowProjectInventorySummary();
 	void ShowBlueprintGraphInventory();
 	void SubmitCurrentRequest();
 	FString GetCurrentRequestValidationError(const FUEAgentFunctionParameters& Parameters, const FString& InputText) const;

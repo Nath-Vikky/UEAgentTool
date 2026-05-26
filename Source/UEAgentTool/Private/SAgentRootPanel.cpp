@@ -202,6 +202,99 @@ namespace UEAgentRootPanelPrivate
 		return true;
 	}
 
+	static int32 GetIntegerFieldOrZero(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName)
+	{
+		int32 Value = 0;
+		TryGetIntegerField(JsonObject, FieldName, Value);
+		return Value;
+	}
+
+	static FString FormatScalarObjectPreview(const TSharedPtr<FJsonObject>& JsonObject, const FString& EmptyText, const int32 MaxItems = 6)
+	{
+		if (!JsonObject.IsValid() || JsonObject->Values.Num() == 0)
+		{
+			return EmptyText;
+		}
+
+		TArray<FString> Parts;
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : JsonObject->Values)
+		{
+			if (!Pair.Value.IsValid())
+			{
+				continue;
+			}
+
+			const FString Value = GetScalarFieldAsString(JsonObject, *Pair.Key);
+			if (!Value.IsEmpty())
+			{
+				Parts.Add(FString::Printf(TEXT("%s=%s"), *Pair.Key, *Value));
+			}
+
+			if (Parts.Num() >= MaxItems)
+			{
+				break;
+			}
+		}
+
+		return Parts.Num() > 0 ? FString::Join(Parts, TEXT(", ")) : EmptyText;
+	}
+
+	static bool BuildProjectInventorySummaryMessage(const TSharedPtr<FJsonObject>& ResponseObject, FString& OutMessage, FString& OutStatus)
+	{
+		const TSharedPtr<FJsonObject> SummaryObject = GetObjectField(ResponseObject, TEXT("summary"));
+		if (!SummaryObject.IsValid())
+		{
+			OutMessage = TEXT("Project Inventory summary response did not include a summary object.");
+			OutStatus = TEXT("Project Inventory summary is unavailable.");
+			return false;
+		}
+
+		const bool bHasSnapshot = GetBoolFieldOrDefault(SummaryObject, TEXT("has_snapshot"), false);
+		if (!bHasSnapshot)
+		{
+			OutMessage = TEXT("No Project Inventory snapshot is available yet. Click Sync Inventory Now, then ask current-project questions again.");
+			OutStatus = TEXT("Project Inventory summary is empty.");
+			return false;
+		}
+
+		const FString ProjectName = GetScalarFieldAsString(SummaryObject, TEXT("project_name"));
+		const FString SnapshotId = GetScalarFieldAsString(SummaryObject, TEXT("snapshot_id"));
+		const FString CreatedAt = GetScalarFieldAsString(SummaryObject, TEXT("created_at"));
+
+		TArray<FString> Lines;
+		Lines.Add(TEXT("Project Inventory Summary"));
+		Lines.Add(FString::Printf(TEXT("- project: %s"), *(ProjectName.IsEmpty() ? FString(TEXT("Unknown")) : ProjectName)));
+		Lines.Add(FString::Printf(TEXT("- snapshot: %s"), *(SnapshotId.IsEmpty() ? FString(TEXT("latest")) : SnapshotId)));
+		if (!CreatedAt.IsEmpty())
+		{
+			Lines.Add(FString::Printf(TEXT("- created_at: %s"), *CreatedAt));
+		}
+		Lines.Add(FString::Printf(TEXT("- assets: %d  |  blueprints: %d  |  static_meshes: %d  |  maps: %d"),
+			GetIntegerFieldOrZero(SummaryObject, TEXT("asset_count")),
+			GetIntegerFieldOrZero(SummaryObject, TEXT("blueprint_count")),
+			GetIntegerFieldOrZero(SummaryObject, TEXT("static_mesh_count")),
+			GetIntegerFieldOrZero(SummaryObject, TEXT("map_count"))));
+		Lines.Add(FString::Printf(TEXT("- code_files: %d  |  level_actors: %d  |  material_instances: %d  |  material_parameters: %d"),
+			GetIntegerFieldOrZero(SummaryObject, TEXT("code_file_count")),
+			GetIntegerFieldOrZero(SummaryObject, TEXT("level_actor_count")),
+			GetIntegerFieldOrZero(SummaryObject, TEXT("material_instance_count")),
+			GetIntegerFieldOrZero(SummaryObject, TEXT("material_parameter_count"))));
+
+		Lines.Add(FString::Printf(TEXT("- asset_types: %s"), *FormatScalarObjectPreview(GetObjectField(SummaryObject, TEXT("asset_type_counts")), TEXT("none"))));
+		Lines.Add(FString::Printf(TEXT("- blueprint_parents: %s"), *FormatScalarObjectPreview(GetObjectField(SummaryObject, TEXT("blueprint_parent_class_counts")), TEXT("none"))));
+		Lines.Add(FString::Printf(TEXT("- levels: %s"), *FormatScalarObjectPreview(GetObjectField(SummaryObject, TEXT("level_actor_level_counts")), TEXT("none"))));
+
+		const TSharedPtr<FJsonObject> DiagnosticsObject = GetObjectField(SummaryObject, TEXT("scan_diagnostics"));
+		if (DiagnosticsObject.IsValid() && DiagnosticsObject->Values.Num() > 0)
+		{
+			Lines.Add(FString::Printf(TEXT("- scan_diagnostics: %s"), *FormatScalarObjectPreview(DiagnosticsObject, TEXT("available"))));
+		}
+
+		OutMessage = FString::Join(Lines, TEXT("\n"));
+		OutStatus = TEXT("Loaded Project Inventory summary.");
+		return true;
+	}
+
 	static bool TryGetBoolField(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, bool& bOutValue)
 	{
 		return JsonObject.IsValid() && JsonObject->TryGetBoolField(FieldName, bOutValue);
@@ -5530,6 +5623,26 @@ void SAgentRootPanel::ReloadCurrentResultDetail()
 	LoadTaskDetail(CurrentTask);
 }
 
+void SAgentRootPanel::ShowProjectInventorySummary()
+{
+	StateStore->SetBusy(true, TEXT("Loading Project Inventory summary..."));
+	HttpClient->RequestProjectInventorySummary([StateStore = StateStore](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	{
+		StateStore->SetBusy(false);
+		if (!bSuccess || !JsonObject.IsValid())
+		{
+			StateStore->AppendSystemMessage(FString::Printf(TEXT("Project Inventory summary unavailable: %s"), *Message), TEXT("Project Inventory"));
+			return;
+		}
+
+		FString SummaryMessage;
+		FString StatusMessage;
+		UEAgentRootPanelPrivate::BuildProjectInventorySummaryMessage(JsonObject, SummaryMessage, StatusMessage);
+		StateStore->AppendSystemMessage(SummaryMessage, TEXT("Project Inventory"));
+		StateStore->SetStatusMessage(StatusMessage);
+	});
+}
+
 void SAgentRootPanel::ShowBlueprintGraphInventory()
 {
 	RefreshEditorContext();
@@ -7719,6 +7832,18 @@ TSharedRef<SWidget> SAgentRootPanel::BuildFunctionSpecificForm(const EUEAgentFun
 					.OnClicked_Lambda([this]()
 					{
 						ShowBlueprintGraphInventory();
+						return FReply::Handled();
+					})
+				]
+				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Show Inventory Summary")))
+					.ToolTipText(FText::FromString(TEXT("Show the latest backend Project Inventory counts in chat, including assets, Blueprints, code files, level actors and Material Instances.")))
+					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+					.OnClicked_Lambda([this]()
+					{
+						ShowProjectInventorySummary();
 						return FReply::Handled();
 					})
 				]

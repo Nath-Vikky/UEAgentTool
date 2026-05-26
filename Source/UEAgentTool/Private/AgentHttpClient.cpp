@@ -297,6 +297,11 @@ void FUEAgentHttpClient::SubmitProjectInventorySnapshot(const TSharedPtr<FJsonOb
 	SendRequest(TEXT("POST"), TEXT("/api/v1/project-inventory/snapshot"), SnapshotObject, Callback);
 }
 
+void FUEAgentHttpClient::RequestProjectInventorySummary(const FJsonResponseCallback& Callback) const
+{
+	SendRequest(TEXT("GET"), TEXT("/api/v1/project-inventory/summary"), nullptr, Callback);
+}
+
 void FUEAgentHttpClient::RequestBlueprintGraphs(const FString& BlueprintQuery, const int32 Limit, const bool bIncludeNodes, const FJsonResponseCallback& Callback) const
 {
 	const int32 SafeLimit = FMath::Clamp(Limit, 1, 100);
