@@ -308,6 +308,27 @@ void FUEAgentHttpClient::RequestAssetInventory(const int32 Limit, const FJsonRes
 	SendRequest(TEXT("GET"), FString::Printf(TEXT("/api/v1/editor-operations/inspect/assets?limit=%d"), SafeLimit), nullptr, Callback);
 }
 
+void FUEAgentHttpClient::RequestAssetDetail(const FString& AssetPath, const FString& Query, const FJsonResponseCallback& Callback) const
+{
+	FString RelativePath = TEXT("/api/v1/editor-operations/inspect/asset-detail");
+	TArray<FString> QueryParts;
+	const FString CleanAssetPath = AssetPath.TrimStartAndEnd();
+	const FString CleanQuery = Query.TrimStartAndEnd();
+	if (!CleanAssetPath.IsEmpty())
+	{
+		QueryParts.Add(FString::Printf(TEXT("asset_path=%s"), *FGenericPlatformHttp::UrlEncode(CleanAssetPath)));
+	}
+	if (!CleanQuery.IsEmpty())
+	{
+		QueryParts.Add(FString::Printf(TEXT("query=%s"), *FGenericPlatformHttp::UrlEncode(CleanQuery)));
+	}
+	if (QueryParts.Num() > 0)
+	{
+		RelativePath += TEXT("?") + FString::Join(QueryParts, TEXT("&"));
+	}
+	SendRequest(TEXT("GET"), RelativePath, nullptr, Callback);
+}
+
 void FUEAgentHttpClient::RequestBlueprintGraphs(const FString& BlueprintQuery, const int32 Limit, const bool bIncludeNodes, const FJsonResponseCallback& Callback) const
 {
 	const int32 SafeLimit = FMath::Clamp(Limit, 1, 100);

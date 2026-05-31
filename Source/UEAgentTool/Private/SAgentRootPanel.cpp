@@ -517,7 +517,69 @@ namespace UEAgentRootPanelPrivate
 		}
 		return Result;
 	}
+	static FString JoinPreviewItems(const TArray<FString>& Values, const int32 MaxItems)
+	{
+		if (Values.Num() == 0)
+		{
+			return TEXT("none");
+		}
 
+		TArray<FString> PreviewValues;
+		for (int32 Index = 0; Index < Values.Num() && Index < MaxItems; ++Index)
+		{
+			PreviewValues.Add(Values[Index]);
+		}
+		FString Preview = FString::Join(PreviewValues, TEXT(", "));
+		if (Values.Num() > MaxItems)
+		{
+			Preview += FString::Printf(TEXT(" ... +%d more"), Values.Num() - MaxItems);
+		}
+		return Preview;
+	}
+
+	static bool BuildAssetDetailMessage(const TSharedPtr<FJsonObject>& ResponseObject, FString& OutMessage, FString& OutStatus)
+	{
+		const TSharedPtr<FJsonObject> ItemObject = GetObjectField(ResponseObject, TEXT("item"));
+		const TSharedPtr<FJsonObject> InspectionObject = GetObjectField(ResponseObject, TEXT("inspection"));
+		if (!ItemObject.IsValid() || ItemObject->Values.Num() == 0)
+		{
+			const FString EmptyReason = GetScalarFieldAsString(InspectionObject, TEXT("empty_reason"));
+			OutMessage = EmptyReason.IsEmpty()
+				? TEXT("Selected asset detail was not found in Project Inventory. Sync Inventory Now, then try again.")
+				: FString::Printf(TEXT("Selected asset detail was not found: %s"), *EmptyReason);
+			OutStatus = TEXT("Selected asset detail unavailable.");
+			return false;
+		}
+
+		const FString AssetName = FirstNonEmptyString(ItemObject, { TEXT("asset_name"), TEXT("asset_id"), TEXT("asset_path") });
+		const FString AssetType = GetScalarFieldAsString(ItemObject, TEXT("asset_type"));
+		const FString AssetPath = GetScalarFieldAsString(ItemObject, TEXT("asset_path"));
+		const FString PackagePath = GetScalarFieldAsString(ItemObject, TEXT("package_path"));
+		const TArray<FString> Dependencies = GetStringArrayField(ItemObject, TEXT("dependencies"));
+		const TArray<FString> Referencers = GetStringArrayField(ItemObject, TEXT("referencers"));
+		const TSharedPtr<FJsonObject> SettingsObject = GetObjectField(ItemObject, TEXT("settings"));
+		const TSharedPtr<FJsonObject> PropertiesObject = GetObjectField(ItemObject, TEXT("properties"));
+
+		TArray<FString> Lines;
+		Lines.Add(FString::Printf(TEXT("Selected Asset Detail: %s"), *(AssetName.IsEmpty() ? FString(TEXT("UnnamedAsset")) : AssetName)));
+		Lines.Add(FString::Printf(TEXT("- type: %s"), *(AssetType.IsEmpty() ? FString(TEXT("Unknown")) : AssetType)));
+		if (!AssetPath.IsEmpty())
+		{
+			Lines.Add(FString::Printf(TEXT("- asset_path: %s"), *AssetPath));
+		}
+		if (!PackagePath.IsEmpty())
+		{
+			Lines.Add(FString::Printf(TEXT("- package_path: %s"), *PackagePath));
+		}
+		Lines.Add(FString::Printf(TEXT("- dependencies: %s"), *JoinPreviewItems(Dependencies, 6)));
+		Lines.Add(FString::Printf(TEXT("- referencers: %s"), *JoinPreviewItems(Referencers, 6)));
+		Lines.Add(FString::Printf(TEXT("- settings: %s"), *FormatScalarObjectPreview(SettingsObject, TEXT("none"), 8)));
+		Lines.Add(FString::Printf(TEXT("- properties: %s"), *FormatScalarObjectPreview(PropertiesObject, TEXT("none"), 8)));
+
+		OutMessage = FString::Join(Lines, TEXT("\n"));
+		OutStatus = FString::Printf(TEXT("Loaded selected asset detail: %s."), *(AssetName.IsEmpty() ? FString(TEXT("asset")) : AssetName));
+		return true;
+	}
 	static void AddFailedField(TSharedPtr<FJsonObject>& ResultObject, const FString& FieldName, const FString& Reason)
 	{
 		TSharedPtr<FJsonObject> FailedFieldObject = MakeShared<FJsonObject>();
@@ -6376,6 +6438,52 @@ void SAgentRootPanel::ShowAssetInventory()
 	});
 }
 
+void SAgentRootPanel::ShowSelectedAssetDetail()
+{
+	RefreshEditorContext();
+	const FUEAgentContextSummary Context = StateStore->GetEditorContext();
+	FString AssetPath;
+	FString AssetQuery;
+	if (Context.SelectedAssetItems.Num() > 0)
+	{
+		const FUEAgentAssetContextItem& AssetItem = Context.SelectedAssetItems[0];
+		AssetPath = AssetItem.AssetPath;
+		AssetQuery = AssetItem.AssetName;
+		if (AssetPath.IsEmpty())
+		{
+			AssetPath = AssetItem.PackagePath;
+		}
+	}
+	else if (Context.SelectedAssets.Num() > 0)
+	{
+		AssetPath = Context.SelectedAssets[0];
+		AssetQuery = UEAgentRootPanelPrivate::GetAssetNameFromPackagePath(UEAgentRootPanelPrivate::NormalizeAssetPackagePath(AssetPath));
+	}
+
+	if (AssetPath.TrimStartAndEnd().IsEmpty() && AssetQuery.TrimStartAndEnd().IsEmpty())
+	{
+		StateStore->AppendSystemMessage(TEXT("Select one asset in Content Browser, then click Show Selected Asset."), TEXT("Project Inventory"));
+		return;
+	}
+
+	StateStore->SetBusy(true, TEXT("Loading selected asset detail..."));
+	HttpClient->RequestAssetDetail(AssetPath, AssetQuery, [StateStore = StateStore](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	{
+		StateStore->SetBusy(false);
+		if (!bSuccess || !JsonObject.IsValid())
+		{
+			StateStore->AppendSystemMessage(FString::Printf(TEXT("Selected asset detail unavailable: %s"), *Message), TEXT("Project Inventory"));
+			return;
+		}
+
+		FString DetailMessage;
+		FString StatusMessage;
+		UEAgentRootPanelPrivate::BuildAssetDetailMessage(JsonObject, DetailMessage, StatusMessage);
+		StateStore->AppendSystemMessage(DetailMessage, TEXT("Project Inventory"));
+		StateStore->SetStatusMessage(StatusMessage);
+	});
+}
+
 void SAgentRootPanel::ShowBlueprintGraphInventory()
 {
 	RefreshEditorContext();
@@ -8565,6 +8673,18 @@ TSharedRef<SWidget> SAgentRootPanel::BuildFunctionSpecificForm(const EUEAgentFun
 					.OnClicked_Lambda([this]()
 					{
 						ShowAssetInventory();
+						return FReply::Handled();
+					})
+				]
+				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Show Selected Asset")))
+					.ToolTipText(FText::FromString(TEXT("Read Project Inventory details for the currently selected Content Browser asset.")))
+					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+					.OnClicked_Lambda([this]()
+					{
+						ShowSelectedAssetDetail();
 						return FReply::Handled();
 					})
 				]

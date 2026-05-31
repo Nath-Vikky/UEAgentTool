@@ -37,6 +37,7 @@ public:
 	void SubmitProjectInventorySnapshot(const TSharedPtr<FJsonObject>& SnapshotObject, const FJsonResponseCallback& Callback) const;
 	void RequestProjectInventorySummary(const FJsonResponseCallback& Callback) const;
 	void RequestAssetInventory(int32 Limit, const FJsonResponseCallback& Callback) const;
+	void RequestAssetDetail(const FString& AssetPath, const FString& Query, const FJsonResponseCallback& Callback) const;
 	void RequestBlueprintGraphs(const FString& BlueprintQuery, int32 Limit, bool bIncludeNodes, const FJsonResponseCallback& Callback) const;
 	void RequestTaskUserView(const FString& TaskId, const FJsonResponseCallback& Callback) const;
 	void RequestTaskDebugView(const FString& TaskId, const FJsonResponseCallback& Callback) const;
