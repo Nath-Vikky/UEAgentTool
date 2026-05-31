@@ -804,6 +804,77 @@ namespace UEAgentRootPanelPrivate
 		return DisplayedCount > 0;
 	}
 
+	static bool BuildEditorOperationActivityMessage(const TSharedPtr<FJsonObject>& DiagnosticsObject, const TSharedPtr<FJsonObject>& HistoryObject, FString& OutMessage, FString& OutStatus)
+	{
+		const TSharedPtr<FJsonObject> DiagnosticsSummary = GetObjectField(DiagnosticsObject, TEXT("summary"));
+		const TSharedPtr<FJsonObject> HistorySummary = GetObjectField(HistoryObject, TEXT("summary"));
+		const int32 InspectedCount = GetIntegerFieldOrZero(DiagnosticsSummary, TEXT("inspected_count"));
+		const int32 ExecutedCount = GetIntegerFieldOrZero(DiagnosticsSummary, TEXT("executed_count"));
+		const int32 PendingCount = GetIntegerFieldOrZero(DiagnosticsSummary, TEXT("pending_count"));
+		const int32 SuccessCount = GetIntegerFieldOrZero(DiagnosticsSummary, TEXT("success_count"));
+		const int32 FailedCount = GetIntegerFieldOrZero(DiagnosticsSummary, TEXT("failed_count"));
+		const int32 AttentionCount = GetIntegerFieldOrZero(DiagnosticsSummary, TEXT("needs_user_attention_count"));
+		const FString AttentionRate = GetScalarFieldAsString(DiagnosticsSummary, TEXT("attention_rate"));
+
+		TArray<FString> Lines;
+		Lines.Add(TEXT("Editor Operation Activity"));
+		Lines.Add(FString::Printf(TEXT("- inspected=%d executed=%d pending=%d success=%d failed=%d attention=%d rate=%s"),
+			InspectedCount,
+			ExecutedCount,
+			PendingCount,
+			SuccessCount,
+			FailedCount,
+			AttentionCount,
+			*(AttentionRate.IsEmpty() ? FString(TEXT("0")) : AttentionRate)));
+		Lines.Add(FString::Printf(TEXT("- operation_types: %s"), *FormatScalarObjectPreview(GetObjectField(DiagnosticsSummary, TEXT("operation_type_counts")), TEXT("none"), 8)));
+		Lines.Add(FString::Printf(TEXT("- execution_states: %s"), *FormatScalarObjectPreview(GetObjectField(DiagnosticsSummary, TEXT("execution_state_counts")), TEXT("none"), 6)));
+		Lines.Add(FString::Printf(TEXT("- diagnostic_flags: %s"), *FormatScalarObjectPreview(GetObjectField(DiagnosticsSummary, TEXT("diagnostic_flag_counts")), TEXT("none"), 6)));
+
+		const TArray<TSharedPtr<FJsonValue>>* ItemValues = nullptr;
+		if (HistoryObject.IsValid() && HistoryObject->TryGetArrayField(TEXT("items"), ItemValues) && ItemValues != nullptr && ItemValues->Num() > 0)
+		{
+			Lines.Add(TEXT("Recent operations:"));
+			int32 DisplayedCount = 0;
+			for (const TSharedPtr<FJsonValue>& ItemValue : *ItemValues)
+			{
+				const TSharedPtr<FJsonObject> ItemObject = ItemValue.IsValid() ? ItemValue->AsObject() : nullptr;
+				if (!ItemObject.IsValid())
+				{
+					continue;
+				}
+
+				const FString Title = FirstNonEmptyString(ItemObject, { TEXT("title"), TEXT("proposal_id"), TEXT("operation_type") });
+				const FString OperationType = GetScalarFieldAsString(ItemObject, TEXT("operation_type"));
+				const FString ConfirmationState = GetScalarFieldAsString(ItemObject, TEXT("confirmation_state"));
+				const FString ExecutionState = GetScalarFieldAsString(ItemObject, TEXT("execution_state"));
+				const FString Success = GetScalarFieldAsString(ItemObject, TEXT("success"));
+				const FString UpdatedAt = GetScalarFieldAsString(ItemObject, TEXT("updated_at"));
+				Lines.Add(FString::Printf(TEXT("- %s | op=%s confirm=%s exec=%s success=%s updated=%s"),
+					*(Title.IsEmpty() ? FString(TEXT("Untitled Proposal")) : Title),
+					*(OperationType.IsEmpty() ? FString(TEXT("unknown")) : OperationType),
+					*(ConfirmationState.IsEmpty() ? FString(TEXT("unknown")) : ConfirmationState),
+					*(ExecutionState.IsEmpty() ? FString(TEXT("pending_result")) : ExecutionState),
+					*(Success.IsEmpty() ? FString(TEXT("n/a")) : Success),
+					*(UpdatedAt.IsEmpty() ? FString(TEXT("unknown")) : UpdatedAt)));
+
+				++DisplayedCount;
+				if (DisplayedCount >= 8)
+				{
+					break;
+				}
+			}
+		}
+		else
+		{
+			Lines.Add(TEXT("Recent operations: none"));
+		}
+
+		const int32 HistoryCount = GetIntegerFieldOrZero(HistorySummary, TEXT("item_count"));
+		OutMessage = FString::Join(Lines, TEXT("\n"));
+		OutStatus = FString::Printf(TEXT("Loaded %d recent editor operations."), HistoryCount);
+		return InspectedCount > 0 || HistoryCount > 0;
+	}
+
 	static void AddFailedField(TSharedPtr<FJsonObject>& ResultObject, const FString& FieldName, const FString& Reason)
 	{
 		TSharedPtr<FJsonObject> FailedFieldObject = MakeShared<FJsonObject>();
@@ -6748,6 +6819,37 @@ void SAgentRootPanel::ShowMaterialInstances()
 	});
 }
 
+void SAgentRootPanel::ShowEditorOperationActivity()
+{
+	StateStore->SetBusy(true, TEXT("Loading Editor Operation activity..."));
+	TSharedPtr<FUEAgentHttpClient> Client = HttpClient;
+	Client->RequestEditorOperationDiagnostics(200, [StateStore = StateStore, Client](bool bDiagnosticsSuccess, const FString& DiagnosticsMessage, const FString& DiagnosticsRawText, TSharedPtr<FJsonObject> DiagnosticsObject)
+	{
+		if (!bDiagnosticsSuccess || !DiagnosticsObject.IsValid())
+		{
+			StateStore->SetBusy(false);
+			StateStore->AppendSystemMessage(FString::Printf(TEXT("Editor Operation diagnostics unavailable: %s"), *DiagnosticsMessage), TEXT("Editor Operations"));
+			return;
+		}
+
+		Client->RequestEditorOperationHistory(12, [StateStore, DiagnosticsObject](bool bHistorySuccess, const FString& HistoryMessage, const FString& HistoryRawText, TSharedPtr<FJsonObject> HistoryObject)
+		{
+			StateStore->SetBusy(false);
+			if (!bHistorySuccess || !HistoryObject.IsValid())
+			{
+				StateStore->AppendSystemMessage(FString::Printf(TEXT("Editor Operation history unavailable: %s"), *HistoryMessage), TEXT("Editor Operations"));
+				return;
+			}
+
+			FString ActivityMessage;
+			FString StatusMessage;
+			UEAgentRootPanelPrivate::BuildEditorOperationActivityMessage(DiagnosticsObject, HistoryObject, ActivityMessage, StatusMessage);
+			StateStore->AppendSystemMessage(ActivityMessage, TEXT("Editor Operations"));
+			StateStore->SetStatusMessage(StatusMessage);
+		});
+	});
+}
+
 void SAgentRootPanel::ShowBlueprintGraphInventory()
 {
 	RefreshEditorContext();
@@ -8985,6 +9087,18 @@ TSharedRef<SWidget> SAgentRootPanel::BuildFunctionSpecificForm(const EUEAgentFun
 					.OnClicked_Lambda([this]()
 					{
 						ShowMaterialInstances();
+						return FReply::Handled();
+					})
+				]
+				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Show Activity")))
+					.ToolTipText(FText::FromString(TEXT("Show recent editor-operation proposals, execution states, and diagnostic counts.")))
+					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+					.OnClicked_Lambda([this]()
+					{
+						ShowEditorOperationActivity();
 						return FReply::Handled();
 					})
 				]

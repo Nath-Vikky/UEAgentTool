@@ -52,6 +52,8 @@ public:
 	void RequestPendingProposals(const FJsonResponseCallback& Callback) const;
 	void SubmitProposalDecision(const FString& ProposalId, const FString& Decision, const FString& Comment, const FJsonResponseCallback& Callback) const;
 	void RequestEditorOperationCapabilities(const FJsonResponseCallback& Callback) const;
+	void RequestEditorOperationHistory(int32 Limit, const FJsonResponseCallback& Callback) const;
+	void RequestEditorOperationDiagnostics(int32 Limit, const FJsonResponseCallback& Callback) const;
 	void CreateWorkflowStepProposal(const TSharedPtr<FJsonObject>& RequestObject, const FJsonResponseCallback& Callback) const;
 	void CreateEditorOperationFollowUpProposal(const FString& ProposalId, const TSharedPtr<FJsonObject>& RequestObject, const FJsonResponseCallback& Callback) const;
 	void ConfirmEditorOperationProposal(const FString& ProposalId, const FJsonResponseCallback& Callback) const;
