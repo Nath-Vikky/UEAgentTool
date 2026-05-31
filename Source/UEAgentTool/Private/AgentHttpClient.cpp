@@ -308,6 +308,11 @@ void FUEAgentHttpClient::RequestAssetInventory(const int32 Limit, const FJsonRes
 	SendRequest(TEXT("GET"), FString::Printf(TEXT("/api/v1/editor-operations/inspect/assets?limit=%d"), SafeLimit), nullptr, Callback);
 }
 
+void FUEAgentHttpClient::RequestLevelActors(const int32 Limit, const FJsonResponseCallback& Callback) const
+{
+	const int32 SafeLimit = FMath::Clamp(Limit, 1, 500);
+	SendRequest(TEXT("GET"), FString::Printf(TEXT("/api/v1/editor-operations/inspect/level-actors?limit=%d"), SafeLimit), nullptr, Callback);
+}
 void FUEAgentHttpClient::RequestAssetDetail(const FString& AssetPath, const FString& Query, const FJsonResponseCallback& Callback) const
 {
 	FString RelativePath = TEXT("/api/v1/editor-operations/inspect/asset-detail");

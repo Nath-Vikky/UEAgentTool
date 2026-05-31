@@ -537,6 +537,45 @@ namespace UEAgentRootPanelPrivate
 		return Preview;
 	}
 
+	static FString GetObjectArrayNamePreview(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, const TArray<const TCHAR*>& NameFields, const int32 MaxItems)
+	{
+		if (!JsonObject.IsValid())
+		{
+			return TEXT("none");
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* ArrayValues = nullptr;
+		if (!JsonObject->TryGetArrayField(FieldName, ArrayValues) || ArrayValues == nullptr)
+		{
+			return TEXT("none");
+		}
+
+		TArray<FString> Names;
+		for (const TSharedPtr<FJsonValue>& Value : *ArrayValues)
+		{
+			if (!Value.IsValid())
+			{
+				continue;
+			}
+
+			FString Name;
+			if (Value->Type == EJson::String)
+			{
+				Name = Value->AsString();
+			}
+			else if (Value->Type == EJson::Object)
+			{
+				Name = FirstNonEmptyString(Value->AsObject(), NameFields);
+			}
+			Name.TrimStartAndEndInline();
+			if (!Name.IsEmpty())
+			{
+				Names.Add(Name);
+			}
+		}
+		return JoinPreviewItems(Names, MaxItems);
+	}
+
 	static bool BuildAssetDetailMessage(const TSharedPtr<FJsonObject>& ResponseObject, FString& OutMessage, FString& OutStatus)
 	{
 		const TSharedPtr<FJsonObject> ItemObject = GetObjectField(ResponseObject, TEXT("item"));
@@ -580,6 +619,80 @@ namespace UEAgentRootPanelPrivate
 		OutStatus = FString::Printf(TEXT("Loaded selected asset detail: %s."), *(AssetName.IsEmpty() ? FString(TEXT("asset")) : AssetName));
 		return true;
 	}
+
+	static bool BuildLevelActorsInventoryMessage(const TSharedPtr<FJsonObject>& ResponseObject, FString& OutMessage, FString& OutStatus)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* ItemValues = nullptr;
+		if (!ResponseObject.IsValid() || !ResponseObject->TryGetArrayField(TEXT("items"), ItemValues) || ItemValues == nullptr)
+		{
+			OutMessage = TEXT("Level actor inventory response did not include an items array.");
+			OutStatus = TEXT("Level actor inventory is unavailable.");
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject> InspectionObject = GetObjectField(ResponseObject, TEXT("inspection"));
+		const TSharedPtr<FJsonObject> SummaryObject = GetObjectField(ResponseObject, TEXT("summary"));
+		const FString EmptyReason = GetScalarFieldAsString(InspectionObject, TEXT("empty_reason"));
+		const int32 TotalActorCount = GetIntegerFieldOrZero(SummaryObject, TEXT("level_actor_count"));
+
+		TArray<FString> Lines;
+		Lines.Add(FString::Printf(TEXT("Level Actor Inventory (%d shown, %d total)"), ItemValues->Num(), TotalActorCount));
+		int32 DisplayedCount = 0;
+		for (const TSharedPtr<FJsonValue>& ItemValue : *ItemValues)
+		{
+			const TSharedPtr<FJsonObject> ItemObject = ItemValue.IsValid() ? ItemValue->AsObject() : nullptr;
+			if (!ItemObject.IsValid())
+			{
+				continue;
+			}
+
+			const FString ActorLabel = FirstNonEmptyString(ItemObject, { TEXT("actor_label"), TEXT("actor_name"), TEXT("actor_path") });
+			const FString ActorClass = GetScalarFieldAsString(ItemObject, TEXT("actor_class"));
+			const FString LevelName = GetScalarFieldAsString(ItemObject, TEXT("level_name"));
+			const FString FolderPath = GetScalarFieldAsString(ItemObject, TEXT("folder_path"));
+			const FString Mobility = GetScalarFieldAsString(ItemObject, TEXT("mobility"));
+			const TSharedPtr<FJsonObject> TransformObject = GetObjectField(ItemObject, TEXT("transform"));
+			const FString LocationPreview = FormatScalarObjectPreview(GetObjectField(TransformObject, TEXT("location")), TEXT("unknown"), 3);
+			const TArray<FString> Tags = GetStringArrayField(ItemObject, TEXT("tags"));
+			const FString ComponentsPreview = GetObjectArrayNamePreview(ItemObject, TEXT("components"), { TEXT("component_name"), TEXT("name"), TEXT("component_class") }, 4);
+
+			Lines.Add(FString::Printf(TEXT("- %s [%s] level=%s loc=%s"),
+				*(ActorLabel.IsEmpty() ? FString(TEXT("UnnamedActor")) : ActorLabel),
+				*(ActorClass.IsEmpty() ? FString(TEXT("UnknownClass")) : ActorClass),
+				*(LevelName.IsEmpty() ? FString(TEXT("UnknownLevel")) : LevelName),
+				*LocationPreview));
+			if (!FolderPath.IsEmpty() || !Mobility.IsEmpty() || Tags.Num() > 0 || ComponentsPreview != TEXT("none"))
+			{
+				Lines.Add(FString::Printf(TEXT("  folder=%s mobility=%s tags=%s components=%s"),
+					*(FolderPath.IsEmpty() ? FString(TEXT("none")) : FolderPath),
+					*(Mobility.IsEmpty() ? FString(TEXT("unknown")) : Mobility),
+					*JoinPreviewItems(Tags, 4),
+					*ComponentsPreview));
+			}
+
+			++DisplayedCount;
+			if (DisplayedCount >= 15)
+			{
+				break;
+			}
+		}
+
+		if (DisplayedCount == 0)
+		{
+			Lines.Add(EmptyReason.IsEmpty()
+				? TEXT("No level actors were returned. Sync Project Inventory while a level is open, then try again.")
+				: FString::Printf(TEXT("No level actors were returned: %s"), *EmptyReason));
+		}
+		else if (ItemValues->Num() > DisplayedCount)
+		{
+			Lines.Add(FString::Printf(TEXT("...and %d more actors. Ask Agent Chat for a filtered list if needed."), ItemValues->Num() - DisplayedCount));
+		}
+
+		OutMessage = FString::Join(Lines, TEXT("\n"));
+		OutStatus = FString::Printf(TEXT("Loaded %d Level Actor inventory items."), ItemValues->Num());
+		return DisplayedCount > 0;
+	}
+
 	static void AddFailedField(TSharedPtr<FJsonObject>& ResultObject, const FString& FieldName, const FString& Reason)
 	{
 		TSharedPtr<FJsonObject> FailedFieldObject = MakeShared<FJsonObject>();
@@ -6484,6 +6597,26 @@ void SAgentRootPanel::ShowSelectedAssetDetail()
 	});
 }
 
+void SAgentRootPanel::ShowLevelActors()
+{
+	StateStore->SetBusy(true, TEXT("Loading Level Actor inventory..."));
+	HttpClient->RequestLevelActors(40, [StateStore = StateStore](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	{
+		StateStore->SetBusy(false);
+		if (!bSuccess || !JsonObject.IsValid())
+		{
+			StateStore->AppendSystemMessage(FString::Printf(TEXT("Level Actor inventory unavailable: %s"), *Message), TEXT("Project Inventory"));
+			return;
+		}
+
+		FString ActorMessage;
+		FString StatusMessage;
+		UEAgentRootPanelPrivate::BuildLevelActorsInventoryMessage(JsonObject, ActorMessage, StatusMessage);
+		StateStore->AppendSystemMessage(ActorMessage, TEXT("Project Inventory"));
+		StateStore->SetStatusMessage(StatusMessage);
+	});
+}
+
 void SAgentRootPanel::ShowBlueprintGraphInventory()
 {
 	RefreshEditorContext();
@@ -8697,6 +8830,18 @@ TSharedRef<SWidget> SAgentRootPanel::BuildFunctionSpecificForm(const EUEAgentFun
 					.OnClicked_Lambda([this]()
 					{
 						ShowBlueprintGraphInventory();
+						return FReply::Handled();
+					})
+				]
+				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Show Level Actors")))
+					.ToolTipText(FText::FromString(TEXT("Read current Project Inventory level actor summaries in chat.")))
+					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+					.OnClicked_Lambda([this]()
+					{
+						ShowLevelActors();
 						return FReply::Handled();
 					})
 				]

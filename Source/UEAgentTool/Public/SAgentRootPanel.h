@@ -40,6 +40,7 @@ private:
 	void ShowProjectInventorySummary();
 	void ShowAssetInventory();
 	void ShowSelectedAssetDetail();
+	void ShowLevelActors();
 	void ShowBlueprintGraphInventory();
 	void SubmitCurrentRequest();
 	FString GetCurrentRequestValidationError(const FUEAgentFunctionParameters& Parameters, const FString& InputText) const;
