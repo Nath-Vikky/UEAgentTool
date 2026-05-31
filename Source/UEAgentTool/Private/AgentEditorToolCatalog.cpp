@@ -151,6 +151,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("slot_type"), TEXT("layout") },
 		{ TEXT("reason"), TEXT("source_task_id") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("reparent_umg_widget")),
+		TEXT("reparent_umg_widget"),
+		TEXT("Move one existing UMG widget under another existing panel widget after backend Proposal confirmation."),
+		TEXT("umg"),
+		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("new_parent_name") },
+		{ TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("set_umg_widget_visibility")),
 		TEXT("set_umg_widget_visibility"),
 		TEXT("Set visibility on one UMG widget after backend Proposal confirmation."),

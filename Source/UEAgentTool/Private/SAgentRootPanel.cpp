@@ -3983,6 +3983,163 @@ namespace UEAgentRootPanelPrivate
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
 		return ExecutionResult;
 	}
+	static FEditorOperationExecutionResult ExecuteReparentUmgWidget(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("UPanelWidget.RemoveChild/AddChild"));
+
+		const FString WidgetBlueprintPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("widget_blueprint_path")));
+		const FString WidgetName = GetScalarFieldAsString(PayloadObject, TEXT("widget_name")).TrimStartAndEnd();
+		const FString NewParentName = GetScalarFieldAsString(PayloadObject, TEXT("new_parent_name")).TrimStartAndEnd();
+		if (WidgetBlueprintPath.IsEmpty() || WidgetName.IsEmpty() || NewParentName.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("widget_blueprint_path, widget_name and new_parent_name are required."));
+			return ExecutionResult;
+		}
+		if (WidgetName.Equals(NewParentName, ESearchCase::IgnoreCase))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_parent_must_differ_from_target"), WidgetName);
+			return ExecutionResult;
+		}
+
+		UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprintAsset(WidgetBlueprintPath);
+		if (WidgetBlueprint == nullptr || WidgetBlueprint->WidgetTree == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_blueprint_not_found"), FString::Printf(TEXT("Widget Blueprint not found: %s"), *WidgetBlueprintPath));
+			return ExecutionResult;
+		}
+
+		UWidget* TargetWidget = nullptr;
+		UWidget* NewParentWidgetRaw = nullptr;
+		WidgetBlueprint->WidgetTree->ForEachWidget([&TargetWidget, &NewParentWidgetRaw, WidgetName, NewParentName](UWidget* ExistingWidget)
+		{
+			if (ExistingWidget == nullptr)
+			{
+				return;
+			}
+			if (ExistingWidget->GetName().Equals(WidgetName, ESearchCase::IgnoreCase))
+			{
+				TargetWidget = ExistingWidget;
+			}
+			if (ExistingWidget->GetName().Equals(NewParentName, ESearchCase::IgnoreCase))
+			{
+				NewParentWidgetRaw = ExistingWidget;
+			}
+		});
+		if (TargetWidget == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_not_found"), WidgetName);
+			return ExecutionResult;
+		}
+		if (NewParentWidgetRaw == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("parent_widget_not_found"), NewParentName);
+			return ExecutionResult;
+		}
+
+		UPanelWidget* NewParentPanel = Cast<UPanelWidget>(NewParentWidgetRaw);
+		if (NewParentPanel == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("parent_widget_is_not_panel"), NewParentName);
+			return ExecutionResult;
+		}
+		if (TargetWidget == WidgetBlueprint->WidgetTree->RootWidget)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("root_widget_cannot_be_reparented"), WidgetName);
+			return ExecutionResult;
+		}
+
+		bool bNewParentIsDescendant = false;
+		UPanelWidget* TargetPanel = Cast<UPanelWidget>(TargetWidget);
+		if (TargetPanel != nullptr)
+		{
+			for (UWidget* ParentCursor = NewParentPanel; ParentCursor != nullptr; )
+			{
+				UPanelWidget* CursorParent = ParentCursor->GetParent();
+				if (CursorParent == nullptr)
+				{
+					break;
+				}
+				if (CursorParent == TargetPanel)
+				{
+					bNewParentIsDescendant = true;
+					break;
+				}
+				ParentCursor = CursorParent;
+			}
+		}
+		if (bNewParentIsDescendant)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("cannot_parent_widget_under_descendant"), NewParentName);
+			return ExecutionResult;
+		}
+
+		UPanelWidget* OldParent = TargetWidget->GetParent();
+		if (OldParent == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_has_no_current_parent"), WidgetName);
+			return ExecutionResult;
+		}
+		if (OldParent == NewParentPanel)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_already_under_parent"), NewParentName);
+			return ExecutionResult;
+		}
+		const FString OldParentName = OldParent->GetName();
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Reparent UMG Widget")));
+		WidgetBlueprint->Modify();
+		WidgetBlueprint->WidgetTree->Modify();
+		TargetWidget->Modify();
+		OldParent->Modify();
+		NewParentPanel->Modify();
+
+		if (!OldParent->RemoveChild(TargetWidget))
+		{
+			ExecutionResult.ExecutionState = TEXT("failed");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("remove_from_old_parent_failed"), OldParentName);
+			return ExecutionResult;
+		}
+		UPanelSlot* NewSlot = NewParentPanel->AddChild(TargetWidget);
+		if (NewSlot == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("failed");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("add_to_new_parent_failed"), NewParentName);
+			return ExecutionResult;
+		}
+		NewSlot->SetFlags(RF_Transactional);
+		NewSlot->Modify();
+
+		TargetWidget->PostEditChange();
+		OldParent->PostEditChange();
+		NewParentPanel->PostEditChange();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to move the widget back to its previous parent. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_blueprint_path"), WidgetBlueprintPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_name"), WidgetName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("old_parent_name"), OldParentName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("new_parent_name"), NewParentPanel->GetName());
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("old_parent_name"), OldParentName);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("new_parent_name"), NewParentPanel->GetName());
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
+		return ExecutionResult;
+	}
 	static FEditorOperationExecutionResult ExecutePlaceActorInLevel(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -4757,6 +4914,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("set_umg_slot_layout_v2"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetUmgSlotLayoutV2);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("reparent_umg_widget"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteReparentUmgWidget);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("set_umg_widget_visibility"), ESearchCase::IgnoreCase))
