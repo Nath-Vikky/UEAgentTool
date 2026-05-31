@@ -74,6 +74,7 @@
 #include "Styling/SlateBrush.h"
 #include "Templates/SubclassOf.h"
 #include "UObject/Class.h"
+#include "UObject/ObjectRedirector.h"
 #include "UObject/UnrealType.h"
 #include "WidgetBlueprint.h"
 #include "Widgets/Input/SButton.h"
@@ -1595,6 +1596,110 @@ namespace UEAgentRootPanelPrivate
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), DuplicatedAsset->GetOutermost() != nullptr ? DuplicatedAsset->GetOutermost()->GetName() : TargetPath);
 		return ExecutionResult;
 	}
+
+	static FEditorOperationExecutionResult ExecuteFixupRedirectors(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("AssetTools.FixupReferencers"));
+
+		FString FolderPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("folder_path")));
+		FolderPath.RemoveFromEnd(TEXT("/"));
+		bool bRecursive = true;
+		PayloadObject->TryGetBoolField(TEXT("recursive"), bRecursive);
+		int32 MaxRedirectors = 50;
+		TryGetIntegerField(PayloadObject, TEXT("max_redirectors"), MaxRedirectors);
+
+		if (FolderPath.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("folder_path is required."));
+			return ExecutionResult;
+		}
+		if (!(FolderPath.StartsWith(TEXT("/Game/"))) || FolderPath == TEXT("/Game"))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("redirector_folder_scope_invalid"), TEXT("Use a bounded subfolder under /Game, for example /Game/Blueprints."));
+			return ExecutionResult;
+		}
+		if (MaxRedirectors < 1 || MaxRedirectors > 200)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("max_redirectors_out_of_range"), TEXT("max_redirectors must be between 1 and 200."));
+			return ExecutionResult;
+		}
+
+		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+		if (AssetToolsModule.Get().IsFixupReferencersInProgress())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("redirector_fixup_in_progress"), TEXT("Another redirector fixup is already in progress."));
+			return ExecutionResult;
+		}
+
+		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		FARFilter Filter;
+		Filter.PackagePaths.Add(FName(*FolderPath));
+		Filter.bRecursivePaths = bRecursive;
+		Filter.ClassPaths.Add(UObjectRedirector::StaticClass()->GetClassPathName());
+
+		TArray<FAssetData> RedirectorAssets;
+		AssetRegistryModule.Get().GetAssets(Filter, RedirectorAssets);
+		if (RedirectorAssets.Num() > MaxRedirectors)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("too_many_redirectors"), FString::Printf(TEXT("Found %d redirectors, max_redirectors is %d."), RedirectorAssets.Num(), MaxRedirectors));
+			ExecutionResult.ResultObject->SetStringField(TEXT("folder_path"), FolderPath);
+			ExecutionResult.ResultObject->SetNumberField(TEXT("redirector_count"), RedirectorAssets.Num());
+			return ExecutionResult;
+		}
+
+		TArray<UObjectRedirector*> Redirectors;
+		TArray<TSharedPtr<FJsonValue>> FixedValues;
+		for (const FAssetData& RedirectorAsset : RedirectorAssets)
+		{
+			UObjectRedirector* Redirector = Cast<UObjectRedirector>(RedirectorAsset.GetAsset());
+			if (Redirector == nullptr)
+			{
+				continue;
+			}
+			Redirectors.Add(Redirector);
+			FixedValues.Add(MakeShared<FJsonValueString>(RedirectorAsset.PackageName.ToString()));
+		}
+
+		ExecutionResult.ResultObject->SetStringField(TEXT("folder_path"), FolderPath);
+		ExecutionResult.ResultObject->SetBoolField(TEXT("recursive"), bRecursive);
+		ExecutionResult.ResultObject->SetNumberField(TEXT("redirector_count"), Redirectors.Num());
+		ExecutionResult.ResultObject->SetArrayField(TEXT("fixed_redirectors"), FixedValues);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("editor_fixup_redirectors"));
+
+		if (Redirectors.Num() == 0)
+		{
+			ExecutionResult.bSuccess = true;
+			ExecutionResult.ExecutionState = TEXT("completed");
+			ExecutionResult.UndoHint = TEXT("No redirectors were found, so no editor changes were made.");
+			ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), false);
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Fixup Redirectors")));
+		AssetToolsModule.Get().FixupReferencers(Redirectors, false, ERedirectFixupMode::DeleteFixedUpRedirectors);
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Review source control changes after redirector fixup; referencers may have been updated by the editor.");
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		for (const TSharedPtr<FJsonValue>& RedirectorValue : FixedValues)
+		{
+			FString RedirectorPath;
+			if (RedirectorValue.IsValid() && RedirectorValue->TryGetString(RedirectorPath))
+			{
+				AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), RedirectorPath);
+			}
+		}
+		return ExecutionResult;
+	}
+
 	static FEditorOperationExecutionResult ExecuteApplyStaticMeshBasicSettings(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -4945,6 +5050,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("duplicate_asset"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteDuplicateAsset);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("fixup_redirectors"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteFixupRedirectors);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("apply_static_mesh_basic_settings"), ESearchCase::IgnoreCase))
