@@ -693,6 +693,117 @@ namespace UEAgentRootPanelPrivate
 		return DisplayedCount > 0;
 	}
 
+	static FString BuildMaterialParameterPreview(const TSharedPtr<FJsonObject>& ItemObject, const int32 MaxItems)
+	{
+		if (!ItemObject.IsValid())
+		{
+			return TEXT("none");
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* ParameterValues = nullptr;
+		if (!ItemObject->TryGetArrayField(TEXT("parameters"), ParameterValues) || ParameterValues == nullptr || ParameterValues->Num() == 0)
+		{
+			return TEXT("none");
+		}
+
+		TArray<FString> Previews;
+		for (const TSharedPtr<FJsonValue>& ParameterValue : *ParameterValues)
+		{
+			const TSharedPtr<FJsonObject> ParameterObject = ParameterValue.IsValid() ? ParameterValue->AsObject() : nullptr;
+			if (!ParameterObject.IsValid())
+			{
+				continue;
+			}
+
+			const FString ParameterName = FirstNonEmptyString(ParameterObject, { TEXT("parameter_name"), TEXT("name"), TEXT("ParameterName") });
+			const FString ParameterType = FirstNonEmptyString(ParameterObject, { TEXT("parameter_type"), TEXT("type"), TEXT("ParameterType") });
+			FString ParameterValueText = FirstNonEmptyString(ParameterObject, {
+				TEXT("value"), TEXT("scalar_value"), TEXT("texture_path"), TEXT("texture_name"), TEXT("default_value"), TEXT("bool_value")
+			});
+			if (ParameterValueText.IsEmpty())
+			{
+				ParameterValueText = FormatScalarObjectPreview(GetObjectField(ParameterObject, TEXT("value")), TEXT(""), 4);
+			}
+			FString Preview = ParameterName.IsEmpty() ? FString(TEXT("parameter")) : ParameterName;
+			if (!ParameterType.IsEmpty())
+			{
+				Preview += FString::Printf(TEXT("<%s>"), *ParameterType);
+			}
+			if (!ParameterValueText.IsEmpty())
+			{
+				Preview += FString::Printf(TEXT("=%s"), *ParameterValueText);
+			}
+			Previews.Add(Preview);
+		}
+		return JoinPreviewItems(Previews, MaxItems);
+	}
+
+	static bool BuildMaterialInstancesInventoryMessage(const TSharedPtr<FJsonObject>& ResponseObject, FString& OutMessage, FString& OutStatus)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* ItemValues = nullptr;
+		if (!ResponseObject.IsValid() || !ResponseObject->TryGetArrayField(TEXT("items"), ItemValues) || ItemValues == nullptr)
+		{
+			OutMessage = TEXT("Material Instance inventory response did not include an items array.");
+			OutStatus = TEXT("Material Instance inventory is unavailable.");
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject> InspectionObject = GetObjectField(ResponseObject, TEXT("inspection"));
+		const TSharedPtr<FJsonObject> SummaryObject = GetObjectField(ResponseObject, TEXT("summary"));
+		const FString EmptyReason = GetScalarFieldAsString(InspectionObject, TEXT("empty_reason"));
+		const int32 TotalMaterialCount = GetIntegerFieldOrZero(SummaryObject, TEXT("material_instance_count"));
+
+		TArray<FString> Lines;
+		Lines.Add(FString::Printf(TEXT("Material Instance Inventory (%d shown, %d total)"), ItemValues->Num(), TotalMaterialCount));
+		int32 DisplayedCount = 0;
+		for (const TSharedPtr<FJsonValue>& ItemValue : *ItemValues)
+		{
+			const TSharedPtr<FJsonObject> ItemObject = ItemValue.IsValid() ? ItemValue->AsObject() : nullptr;
+			if (!ItemObject.IsValid())
+			{
+				continue;
+			}
+
+			const FString MaterialName = FirstNonEmptyString(ItemObject, { TEXT("material_instance_name"), TEXT("asset_name"), TEXT("material_instance_path") });
+			const FString MaterialPath = GetScalarFieldAsString(ItemObject, TEXT("material_instance_path"));
+			const FString ParentMaterial = GetScalarFieldAsString(ItemObject, TEXT("parent_material"));
+			const FString ParameterCount = GetScalarFieldAsString(ItemObject, TEXT("parameter_count"));
+			const FString ParameterPreview = BuildMaterialParameterPreview(ItemObject, 6);
+
+			Lines.Add(FString::Printf(TEXT("- %s parent=%s params=%s"),
+				*(MaterialName.IsEmpty() ? FString(TEXT("UnnamedMaterialInstance")) : MaterialName),
+				*(ParentMaterial.IsEmpty() ? FString(TEXT("Unknown")) : ParentMaterial),
+				*(ParameterCount.IsEmpty() ? FString(TEXT("0")) : ParameterCount)));
+			if (!MaterialPath.IsEmpty() || ParameterPreview != TEXT("none"))
+			{
+				Lines.Add(FString::Printf(TEXT("  path=%s parameters=%s"),
+					*(MaterialPath.IsEmpty() ? FString(TEXT("unknown")) : MaterialPath),
+					*ParameterPreview));
+			}
+
+			++DisplayedCount;
+			if (DisplayedCount >= 15)
+			{
+				break;
+			}
+		}
+
+		if (DisplayedCount == 0)
+		{
+			Lines.Add(EmptyReason.IsEmpty()
+				? TEXT("No Material Instances were returned. Sync Project Inventory, then try again.")
+				: FString::Printf(TEXT("No Material Instances were returned: %s"), *EmptyReason));
+		}
+		else if (ItemValues->Num() > DisplayedCount)
+		{
+			Lines.Add(FString::Printf(TEXT("...and %d more Material Instances. Ask Agent Chat for a filtered list if needed."), ItemValues->Num() - DisplayedCount));
+		}
+
+		OutMessage = FString::Join(Lines, TEXT("\n"));
+		OutStatus = FString::Printf(TEXT("Loaded %d Material Instance inventory items."), ItemValues->Num());
+		return DisplayedCount > 0;
+	}
+
 	static void AddFailedField(TSharedPtr<FJsonObject>& ResultObject, const FString& FieldName, const FString& Reason)
 	{
 		TSharedPtr<FJsonObject> FailedFieldObject = MakeShared<FJsonObject>();
@@ -6617,6 +6728,26 @@ void SAgentRootPanel::ShowLevelActors()
 	});
 }
 
+void SAgentRootPanel::ShowMaterialInstances()
+{
+	StateStore->SetBusy(true, TEXT("Loading Material Instance inventory..."));
+	HttpClient->RequestMaterialInstances(40, [StateStore = StateStore](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	{
+		StateStore->SetBusy(false);
+		if (!bSuccess || !JsonObject.IsValid())
+		{
+			StateStore->AppendSystemMessage(FString::Printf(TEXT("Material Instance inventory unavailable: %s"), *Message), TEXT("Project Inventory"));
+			return;
+		}
+
+		FString MaterialMessage;
+		FString StatusMessage;
+		UEAgentRootPanelPrivate::BuildMaterialInstancesInventoryMessage(JsonObject, MaterialMessage, StatusMessage);
+		StateStore->AppendSystemMessage(MaterialMessage, TEXT("Project Inventory"));
+		StateStore->SetStatusMessage(StatusMessage);
+	});
+}
+
 void SAgentRootPanel::ShowBlueprintGraphInventory()
 {
 	RefreshEditorContext();
@@ -8842,6 +8973,18 @@ TSharedRef<SWidget> SAgentRootPanel::BuildFunctionSpecificForm(const EUEAgentFun
 					.OnClicked_Lambda([this]()
 					{
 						ShowLevelActors();
+						return FReply::Handled();
+					})
+				]
+				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Show Materials")))
+					.ToolTipText(FText::FromString(TEXT("Read current Project Inventory Material Instance parameter summaries in chat.")))
+					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+					.OnClicked_Lambda([this]()
+					{
+						ShowMaterialInstances();
 						return FReply::Handled();
 					})
 				]
