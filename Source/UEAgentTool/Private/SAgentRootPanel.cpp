@@ -3699,6 +3699,95 @@ namespace UEAgentRootPanelPrivate
 		return ExecutionResult;
 	}
 
+	static FEditorOperationExecutionResult ExecuteDeleteUmgWidget(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("UWidgetTree.RemoveWidget"));
+
+		const FString WidgetBlueprintPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("widget_blueprint_path")));
+		const FString WidgetName = GetScalarFieldAsString(PayloadObject, TEXT("widget_name")).TrimStartAndEnd();
+		if (WidgetBlueprintPath.IsEmpty() || WidgetName.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("widget_blueprint_path and widget_name are required."));
+			return ExecutionResult;
+		}
+
+		UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprintAsset(WidgetBlueprintPath);
+		if (WidgetBlueprint == nullptr || WidgetBlueprint->WidgetTree == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_blueprint_not_found"), FString::Printf(TEXT("Widget Blueprint not found: %s"), *WidgetBlueprintPath));
+			return ExecutionResult;
+		}
+
+		UWidget* TargetWidget = nullptr;
+		WidgetBlueprint->WidgetTree->ForEachWidget([&TargetWidget, WidgetName](UWidget* ExistingWidget)
+		{
+			if (ExistingWidget != nullptr && ExistingWidget->GetName().Equals(WidgetName, ESearchCase::IgnoreCase))
+			{
+				TargetWidget = ExistingWidget;
+			}
+		});
+		if (TargetWidget == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_not_found"), WidgetName);
+			return ExecutionResult;
+		}
+		if (TargetWidget == WidgetBlueprint->WidgetTree->RootWidget)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("root_widget_cannot_be_deleted"), WidgetName);
+			return ExecutionResult;
+		}
+		if (Cast<UPanelWidget>(TargetWidget) != nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("panel_widget_delete_not_supported_in_v1"), WidgetName);
+			return ExecutionResult;
+		}
+
+		UPanelWidget* OldParent = TargetWidget->GetParent();
+		if (OldParent == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_has_no_current_parent"), WidgetName);
+			return ExecutionResult;
+		}
+		const FString OldParentName = OldParent->GetName();
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Delete UMG Widget")));
+		WidgetBlueprint->Modify();
+		WidgetBlueprint->WidgetTree->Modify();
+		TargetWidget->Modify();
+		OldParent->Modify();
+
+		if (!WidgetBlueprint->WidgetTree->RemoveWidget(TargetWidget))
+		{
+			ExecutionResult.ExecutionState = TEXT("failed");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("remove_widget_failed"), WidgetName);
+			return ExecutionResult;
+		}
+
+		OldParent->PostEditChange();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to restore the deleted widget. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_blueprint_path"), WidgetBlueprintPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_name"), WidgetName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("old_parent_name"), OldParentName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("widget_name"), WidgetName);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("old_parent_name"), OldParentName);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("removed_widgets"), WidgetName);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
+		return ExecutionResult;
+	}
 	static FEditorOperationExecutionResult ExecuteSetUmgWidgetText(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -5297,6 +5386,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("duplicate_umg_widget"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteDuplicateUmgWidget);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("delete_umg_widget"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteDeleteUmgWidget);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("set_umg_widget_text"), ESearchCase::IgnoreCase))

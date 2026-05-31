@@ -151,6 +151,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("new_widget_name") },
 		{ TEXT("reason"), TEXT("source_task_id") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("delete_umg_widget")),
+		TEXT("delete_umg_widget"),
+		TEXT("Remove one existing non-root non-panel UMG widget after backend Proposal confirmation."),
+		TEXT("umg"),
+		{ TEXT("widget_blueprint_path"), TEXT("widget_name") },
+		{ TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("set_umg_widget_text")),
 		TEXT("set_umg_widget_text"),
 		TEXT("Set text on one TextBlock in a Widget Blueprint after backend Proposal confirmation."),
