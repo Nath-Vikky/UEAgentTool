@@ -75,6 +75,7 @@
 #include "Templates/SubclassOf.h"
 #include "UObject/Class.h"
 #include "UObject/ObjectRedirector.h"
+#include "UObject/UObjectGlobals.h"
 #include "UObject/UnrealType.h"
 #include "WidgetBlueprint.h"
 #include "Widgets/Input/SButton.h"
@@ -3507,6 +3508,197 @@ namespace UEAgentRootPanelPrivate
 		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
 		return ExecutionResult;
 	}
+
+	static FEditorOperationExecutionResult ExecuteDuplicateUmgWidget(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("DuplicateObject<UWidget> + UPanelWidget.AddChild"));
+
+		const FString WidgetBlueprintPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("widget_blueprint_path")));
+		const FString SourceWidgetName = GetScalarFieldAsString(PayloadObject, TEXT("widget_name")).TrimStartAndEnd();
+		const FString NewWidgetName = GetScalarFieldAsString(PayloadObject, TEXT("new_widget_name")).TrimStartAndEnd();
+		if (WidgetBlueprintPath.IsEmpty() || SourceWidgetName.IsEmpty() || NewWidgetName.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("widget_blueprint_path, widget_name and new_widget_name are required."));
+			return ExecutionResult;
+		}
+		if (SourceWidgetName.Equals(NewWidgetName, ESearchCase::IgnoreCase))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("new_widget_name_must_differ_from_source"), SourceWidgetName);
+			return ExecutionResult;
+		}
+
+		FText InvalidNameReason;
+		const FName NewWidgetFName(*NewWidgetName);
+		if (!NewWidgetFName.IsValidXName(INVALID_NAME_CHARACTERS, &InvalidNameReason))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("invalid_new_widget_name"), InvalidNameReason.ToString());
+			return ExecutionResult;
+		}
+
+		UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprintAsset(WidgetBlueprintPath);
+		if (WidgetBlueprint == nullptr || WidgetBlueprint->WidgetTree == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_blueprint_not_found"), FString::Printf(TEXT("Widget Blueprint not found: %s"), *WidgetBlueprintPath));
+			return ExecutionResult;
+		}
+
+		UWidget* SourceWidget = nullptr;
+		bool bNewWidgetAlreadyExists = false;
+		WidgetBlueprint->WidgetTree->ForEachWidget([&SourceWidget, &bNewWidgetAlreadyExists, SourceWidgetName, NewWidgetName](UWidget* ExistingWidget)
+		{
+			if (ExistingWidget == nullptr)
+			{
+				return;
+			}
+			if (ExistingWidget->GetName().Equals(SourceWidgetName, ESearchCase::IgnoreCase))
+			{
+				SourceWidget = ExistingWidget;
+			}
+			if (ExistingWidget->GetName().Equals(NewWidgetName, ESearchCase::IgnoreCase))
+			{
+				bNewWidgetAlreadyExists = true;
+			}
+		});
+		if (SourceWidget == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("source_widget_not_found"), SourceWidgetName);
+			return ExecutionResult;
+		}
+		if (bNewWidgetAlreadyExists)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("new_widget_already_exists"), NewWidgetName);
+			return ExecutionResult;
+		}
+		if (SourceWidget == WidgetBlueprint->WidgetTree->RootWidget)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("root_widget_cannot_be_duplicated_in_v1"), SourceWidgetName);
+			return ExecutionResult;
+		}
+		if (Cast<UPanelWidget>(SourceWidget) != nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("panel_widget_duplicate_not_supported_in_v1"), SourceWidgetName);
+			return ExecutionResult;
+		}
+
+		UPanelWidget* ParentPanel = SourceWidget->GetParent();
+		if (ParentPanel == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("source_widget_has_no_parent"), SourceWidgetName);
+			return ExecutionResult;
+		}
+		UPanelSlot* SourceSlot = SourceWidget->Slot;
+		const FString ParentWidgetName = ParentPanel->GetName();
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Duplicate UMG Widget")));
+		WidgetBlueprint->Modify();
+		WidgetBlueprint->WidgetTree->Modify();
+		SourceWidget->Modify();
+		ParentPanel->Modify();
+
+		UWidget* NewWidget = DuplicateObject<UWidget>(SourceWidget, WidgetBlueprint->WidgetTree, NewWidgetFName);
+		if (NewWidget == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("failed");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("widget_duplicate_failed"), NewWidgetName);
+			return ExecutionResult;
+		}
+		NewWidget->SetFlags(RF_Transactional);
+		NewWidget->Modify();
+		NewWidget->Slot = nullptr;
+		NewWidget->bIsVariable = SourceWidget->bIsVariable;
+
+		UPanelSlot* NewSlot = ParentPanel->AddChild(NewWidget);
+		if (NewSlot == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("failed");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("add_duplicate_to_parent_failed"), ParentWidgetName);
+			return ExecutionResult;
+		}
+		NewSlot->SetFlags(RF_Transactional);
+		NewSlot->Modify();
+
+		FString CopiedSlotType = TEXT("default");
+		if (UCanvasPanelSlot* SourceCanvasSlot = Cast<UCanvasPanelSlot>(SourceSlot))
+		{
+			if (UCanvasPanelSlot* TargetCanvasSlot = Cast<UCanvasPanelSlot>(NewSlot))
+			{
+				TargetCanvasSlot->SetPosition(SourceCanvasSlot->GetPosition());
+				TargetCanvasSlot->SetSize(SourceCanvasSlot->GetSize());
+				TargetCanvasSlot->SetAlignment(SourceCanvasSlot->GetAlignment());
+				TargetCanvasSlot->SetAnchors(SourceCanvasSlot->GetAnchors());
+				TargetCanvasSlot->SetZOrder(SourceCanvasSlot->GetZOrder());
+				CopiedSlotType = TEXT("CanvasPanelSlot");
+			}
+		}
+		else if (UHorizontalBoxSlot* SourceHorizontalSlot = Cast<UHorizontalBoxSlot>(SourceSlot))
+		{
+			if (UHorizontalBoxSlot* TargetHorizontalSlot = Cast<UHorizontalBoxSlot>(NewSlot))
+			{
+				TargetHorizontalSlot->SetPadding(SourceHorizontalSlot->GetPadding());
+				TargetHorizontalSlot->SetSize(SourceHorizontalSlot->GetSize());
+				TargetHorizontalSlot->SetHorizontalAlignment(SourceHorizontalSlot->GetHorizontalAlignment());
+				TargetHorizontalSlot->SetVerticalAlignment(SourceHorizontalSlot->GetVerticalAlignment());
+				CopiedSlotType = TEXT("HorizontalBoxSlot");
+			}
+		}
+		else if (UVerticalBoxSlot* SourceVerticalSlot = Cast<UVerticalBoxSlot>(SourceSlot))
+		{
+			if (UVerticalBoxSlot* TargetVerticalSlot = Cast<UVerticalBoxSlot>(NewSlot))
+			{
+				TargetVerticalSlot->SetPadding(SourceVerticalSlot->GetPadding());
+				TargetVerticalSlot->SetSize(SourceVerticalSlot->GetSize());
+				TargetVerticalSlot->SetHorizontalAlignment(SourceVerticalSlot->GetHorizontalAlignment());
+				TargetVerticalSlot->SetVerticalAlignment(SourceVerticalSlot->GetVerticalAlignment());
+				CopiedSlotType = TEXT("VerticalBoxSlot");
+			}
+		}
+		else if (UOverlaySlot* SourceOverlaySlot = Cast<UOverlaySlot>(SourceSlot))
+		{
+			if (UOverlaySlot* TargetOverlaySlot = Cast<UOverlaySlot>(NewSlot))
+			{
+				TargetOverlaySlot->SetPadding(SourceOverlaySlot->GetPadding());
+				TargetOverlaySlot->SetHorizontalAlignment(SourceOverlaySlot->GetHorizontalAlignment());
+				TargetOverlaySlot->SetVerticalAlignment(SourceOverlaySlot->GetVerticalAlignment());
+				CopiedSlotType = TEXT("OverlaySlot");
+			}
+		}
+
+		NewWidget->PostEditChange();
+		ParentPanel->PostEditChange();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to remove the duplicated widget. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_blueprint_path"), WidgetBlueprintPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("source_widget_name"), SourceWidgetName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_name"), NewWidgetName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("new_widget_name"), NewWidgetName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("parent_widget_name"), ParentWidgetName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("widget_class"), NewWidget->GetClass() != nullptr ? NewWidget->GetClass()->GetPathName() : FString());
+		ExecutionResult.ResultObject->SetStringField(TEXT("copied_slot_type"), CopiedSlotType);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("source_widget_name"), SourceWidgetName);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("new_widget_name"), NewWidgetName);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("parent_widget_name"), ParentWidgetName);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("copied_slot_type"), CopiedSlotType);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("duplicated_widgets"), NewWidgetName);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), WidgetBlueprint->GetOutermost() != nullptr ? WidgetBlueprint->GetOutermost()->GetName() : FString());
+		return ExecutionResult;
+	}
+
 	static FEditorOperationExecutionResult ExecuteSetUmgWidgetText(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -5100,6 +5292,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("add_umg_widget"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteAddUmgWidget);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("duplicate_umg_widget"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteDuplicateUmgWidget);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("set_umg_widget_text"), ESearchCase::IgnoreCase))

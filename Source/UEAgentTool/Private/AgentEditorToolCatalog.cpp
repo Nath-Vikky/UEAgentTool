@@ -144,6 +144,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("widget_class") },
 		{ TEXT("parent_widget_name"), TEXT("text"), TEXT("is_variable") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("duplicate_umg_widget")),
+		TEXT("duplicate_umg_widget"),
+		TEXT("Duplicate one existing non-panel UMG widget under the same parent after backend Proposal confirmation."),
+		TEXT("umg"),
+		{ TEXT("widget_blueprint_path"), TEXT("widget_name"), TEXT("new_widget_name") },
+		{ TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("set_umg_widget_text")),
 		TEXT("set_umg_widget_text"),
 		TEXT("Set text on one TextBlock in a Widget Blueprint after backend Proposal confirmation."),
