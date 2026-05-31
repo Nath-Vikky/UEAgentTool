@@ -101,6 +101,8 @@
 
 namespace UEAgentRootPanelPrivate
 {
+	static FString FirstNonEmptyString(const TSharedPtr<FJsonObject>& JsonObject, const TArray<const TCHAR*>& FieldNames);
+
 	struct FGeneratedDraftItem
 	{
 		FString Label;
@@ -297,6 +299,63 @@ namespace UEAgentRootPanelPrivate
 		return true;
 	}
 
+	static bool BuildAssetInventoryMessage(const TSharedPtr<FJsonObject>& ResponseObject, FString& OutMessage, FString& OutStatus)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* ItemValues = nullptr;
+		if (!ResponseObject.IsValid() || !ResponseObject->TryGetArrayField(TEXT("items"), ItemValues) || ItemValues == nullptr)
+		{
+			OutMessage = TEXT("Asset inventory response did not include an items array.");
+			OutStatus = TEXT("Asset inventory is unavailable.");
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject> InspectionObject = GetObjectField(ResponseObject, TEXT("inspection"));
+		const TSharedPtr<FJsonObject> SummaryObject = GetObjectField(ResponseObject, TEXT("summary"));
+		const FString EmptyReason = GetScalarFieldAsString(InspectionObject, TEXT("empty_reason"));
+		const int32 AssetCount = GetIntegerFieldOrZero(SummaryObject, TEXT("asset_count"));
+
+		TArray<FString> Lines;
+		Lines.Add(FString::Printf(TEXT("Project Asset Inventory (%d shown, %d total)"), ItemValues->Num(), AssetCount));
+		int32 DisplayedCount = 0;
+		for (const TSharedPtr<FJsonValue>& ItemValue : *ItemValues)
+		{
+			const TSharedPtr<FJsonObject> ItemObject = ItemValue.IsValid() ? ItemValue->AsObject() : nullptr;
+			if (!ItemObject.IsValid())
+			{
+				continue;
+			}
+
+			const FString AssetName = FirstNonEmptyString(ItemObject, { TEXT("asset_name"), TEXT("asset_id"), TEXT("asset_path") });
+			const FString AssetType = GetScalarFieldAsString(ItemObject, TEXT("asset_type"));
+			const FString PackagePath = GetScalarFieldAsString(ItemObject, TEXT("package_path"));
+			const FString AssetPath = GetScalarFieldAsString(ItemObject, TEXT("asset_path"));
+			Lines.Add(FString::Printf(TEXT("- %s [%s] %s"),
+				*(AssetName.IsEmpty() ? FString(TEXT("UnnamedAsset")) : AssetName),
+				*(AssetType.IsEmpty() ? FString(TEXT("Unknown")) : AssetType),
+				*(PackagePath.IsEmpty() ? AssetPath : PackagePath)));
+
+			++DisplayedCount;
+			if (DisplayedCount >= 15)
+			{
+				break;
+			}
+		}
+
+		if (DisplayedCount == 0)
+		{
+			Lines.Add(EmptyReason.IsEmpty()
+				? TEXT("No assets were returned. Sync Project Inventory first, then try again.")
+				: FString::Printf(TEXT("No assets were returned: %s"), *EmptyReason));
+		}
+		else if (ItemValues->Num() > DisplayedCount)
+		{
+			Lines.Add(FString::Printf(TEXT("...and %d more assets. Ask Agent Chat for a filtered list if needed."), ItemValues->Num() - DisplayedCount));
+		}
+
+		OutMessage = FString::Join(Lines, TEXT("\n"));
+		OutStatus = FString::Printf(TEXT("Loaded %d Project Inventory assets."), ItemValues->Num());
+		return DisplayedCount > 0;
+	}
 	static bool TryGetBoolField(const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, bool& bOutValue)
 	{
 		return JsonObject.IsValid() && JsonObject->TryGetBoolField(FieldName, bOutValue);
@@ -6297,6 +6356,26 @@ void SAgentRootPanel::ShowProjectInventorySummary()
 	});
 }
 
+void SAgentRootPanel::ShowAssetInventory()
+{
+	StateStore->SetBusy(true, TEXT("Loading Project Inventory assets..."));
+	HttpClient->RequestAssetInventory(30, [StateStore = StateStore](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	{
+		StateStore->SetBusy(false);
+		if (!bSuccess || !JsonObject.IsValid())
+		{
+			StateStore->AppendSystemMessage(FString::Printf(TEXT("Asset inventory unavailable: %s"), *Message), TEXT("Project Inventory"));
+			return;
+		}
+
+		FString AssetMessage;
+		FString StatusMessage;
+		UEAgentRootPanelPrivate::BuildAssetInventoryMessage(JsonObject, AssetMessage, StatusMessage);
+		StateStore->AppendSystemMessage(AssetMessage, TEXT("Project Inventory"));
+		StateStore->SetStatusMessage(StatusMessage);
+	});
+}
+
 void SAgentRootPanel::ShowBlueprintGraphInventory()
 {
 	RefreshEditorContext();
@@ -8474,6 +8553,18 @@ TSharedRef<SWidget> SAgentRootPanel::BuildFunctionSpecificForm(const EUEAgentFun
 					.OnClicked_Lambda([this]()
 					{
 						SubmitProjectInventorySnapshot(false);
+						return FReply::Handled();
+					})
+				]
+				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Show Assets")))
+					.ToolTipText(FText::FromString(TEXT("Read the latest backend Project Inventory and list project assets in chat.")))
+					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+					.OnClicked_Lambda([this]()
+					{
+						ShowAssetInventory();
 						return FReply::Handled();
 					})
 				]

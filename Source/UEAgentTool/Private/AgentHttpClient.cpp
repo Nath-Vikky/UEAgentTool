@@ -302,6 +302,12 @@ void FUEAgentHttpClient::RequestProjectInventorySummary(const FJsonResponseCallb
 	SendRequest(TEXT("GET"), TEXT("/api/v1/project-inventory/summary"), nullptr, Callback);
 }
 
+void FUEAgentHttpClient::RequestAssetInventory(const int32 Limit, const FJsonResponseCallback& Callback) const
+{
+	const int32 SafeLimit = FMath::Clamp(Limit, 1, 500);
+	SendRequest(TEXT("GET"), FString::Printf(TEXT("/api/v1/editor-operations/inspect/assets?limit=%d"), SafeLimit), nullptr, Callback);
+}
+
 void FUEAgentHttpClient::RequestBlueprintGraphs(const FString& BlueprintQuery, const int32 Limit, const bool bIncludeNodes, const FJsonResponseCallback& Callback) const
 {
 	const int32 SafeLimit = FMath::Clamp(Limit, 1, 100);
