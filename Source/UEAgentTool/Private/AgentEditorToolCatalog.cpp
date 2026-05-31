@@ -51,6 +51,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("asset_paths"), TEXT("target_folder") },
 		{ TEXT("reason"), TEXT("source_task_id") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("duplicate_asset")),
+		TEXT("duplicate_asset"),
+		TEXT("Duplicate one asset to a new /Game path after backend Proposal confirmation."),
+		TEXT("asset"),
+		{ TEXT("source_asset_path"), TEXT("new_name") },
+		{ TEXT("target_folder"), TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("set_static_mesh_settings")),
 		TEXT("apply_static_mesh_basic_settings"),
 		TEXT("Apply whitelisted Static Mesh settings after backend Proposal confirmation."),

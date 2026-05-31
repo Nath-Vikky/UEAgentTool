@@ -1509,6 +1509,92 @@ namespace UEAgentRootPanelPrivate
 		return ExecutionResult;
 	}
 
+	static FEditorOperationExecutionResult ExecuteDuplicateAsset(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("AssetTools.DuplicateAsset"));
+
+		const FString SourceAssetPath = NormalizeAssetPackagePath(FirstNonEmptyString(PayloadObject, { TEXT("source_asset_path"), TEXT("asset_path"), TEXT("source_path") }));
+		FString TargetFolderPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("target_folder")));
+		TargetFolderPath.RemoveFromEnd(TEXT("/"));
+		const FString NewName = GetScalarFieldAsString(PayloadObject, TEXT("new_name")).TrimStartAndEnd();
+		if (SourceAssetPath.IsEmpty() || NewName.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("source_asset_path and new_name are required."));
+			return ExecutionResult;
+		}
+		if (TargetFolderPath.IsEmpty() || TargetFolderPath == TEXT("/Game"))
+		{
+			TargetFolderPath = FPaths::GetPath(SourceAssetPath);
+		}
+		if (!(SourceAssetPath == TEXT("/Game") || SourceAssetPath.StartsWith(TEXT("/Game/")))
+			|| !(TargetFolderPath == TEXT("/Game") || TargetFolderPath.StartsWith(TEXT("/Game/"))))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("asset_path_must_be_under_game"), FString::Printf(TEXT("source=%s target_folder=%s"), *SourceAssetPath, *TargetFolderPath));
+			return ExecutionResult;
+		}
+		if (NewName.Contains(TEXT("/")) || NewName.Contains(TEXT("\\")) || NewName.Contains(TEXT(".")))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("new_name_invalid"), NewName);
+			return ExecutionResult;
+		}
+
+		UObject* SourceAsset = LoadEditorAsset(SourceAssetPath);
+		if (SourceAsset == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("source_asset_not_found"), SourceAssetPath);
+			return ExecutionResult;
+		}
+
+		const FString TargetPath = FString::Printf(TEXT("%s/%s"), *TargetFolderPath, *NewName);
+		if (TargetPath == SourceAssetPath)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("duplicate_target_matches_source"), TargetPath);
+			return ExecutionResult;
+		}
+		if (LoadEditorAsset(TargetPath) != nullptr || FPackageName::DoesPackageExist(TargetPath))
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("target_asset_exists"), TargetPath);
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Duplicate Asset")));
+		SourceAsset->Modify();
+		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+		UObject* DuplicatedAsset = AssetToolsModule.Get().DuplicateAsset(NewName, TargetFolderPath, SourceAsset);
+		if (DuplicatedAsset == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("failed");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("duplicate_asset_failed"), TEXT("AssetTools DuplicateAsset returned null."));
+			return ExecutionResult;
+		}
+
+		DuplicatedAsset->SetFlags(RF_Transactional);
+		DuplicatedAsset->Modify();
+		DuplicatedAsset->MarkPackageDirty();
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo or delete the duplicated asset. The package is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetStringField(TEXT("source_asset_path"), SourceAssetPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("target_folder"), TargetFolderPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("new_name"), NewName);
+		ExecutionResult.ResultObject->SetStringField(TEXT("target_path"), TargetPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("duplicated_asset_path"), TargetPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("target_path"), TargetPath);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("duplicated_assets"), TargetPath);
+		AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), DuplicatedAsset->GetOutermost() != nullptr ? DuplicatedAsset->GetOutermost()->GetName() : TargetPath);
+		return ExecutionResult;
+	}
 	static FEditorOperationExecutionResult ExecuteApplyStaticMeshBasicSettings(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -4854,6 +4940,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("move_assets"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteMoveAssets);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("duplicate_asset"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteDuplicateAsset);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("apply_static_mesh_basic_settings"), ESearchCase::IgnoreCase))
