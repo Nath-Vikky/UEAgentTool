@@ -139,7 +139,7 @@ Assets Inspect 结果里也会显示“LLM 分析结果”卡片，用于解释�
 - `add_blueprint_variable`：向现有 Blueprint 添加变量，支持常见内置类型和可解析的 `/Script/`、`/Game/` 类型路径。
 - `add_blueprint_component`：向现有 Blueprint 的 Simple Construction Script 添加组件；`attach_to` 和 `transform` 属于 best-effort 字段。
 - `create_blueprint_event_stub`：在 EventGraph 创建基础事件节点，只支持 `BeginPlay / Tick / ActorBeginOverlap / ActorEndOverlap`，不生成复杂连线或完整逻辑。
-- `add_blueprint_node_template`：创建受控 Blueprint 节点模板，例如 `print_string`、`branch_print_string`、`sequence_print_strings`、`delay_print_string`、变量 Get/Set、无参函数调用和 Enhanced Input Action 事件节点。
+- `add_blueprint_node_template`：创建受控 Blueprint 节点模板，例如 `print_string`、`branch_print_string`、`sequence_print_strings`、`delay_print_string`、变量 Get/Set、无参函数调用、Enhanced Input Action 事件节点，以及 `enhanced_input_print_string` 的 `Triggered -> PrintString` 安全链。
 
 点击确认后，插件会先通知后端该 Proposal 已确认，再调用 UE Editor API 执行，最后把执行结果回传后端。点击拒绝只会通知后端取消，不会执行编辑器操作。
 
@@ -194,6 +194,7 @@ Blueprint graph operations now report richer result data back to the backend:
 - `linked_pin_summaries[]` contains display-friendly strings.
 - `add_blueprint_node_template` also reports `created_node_id` and, when an entry event is used, `entry_node_id`.
 - `delay_print_string` creates a bounded `BeginPlay -> Delay -> PrintString` template and reports `delay_seconds`.
+- `enhanced_input_print_string` creates an Enhanced Input Action event, creates `PrintString`, and attempts `Triggered -> Execute` without breaking existing links.
 
 These fields help the backend create safer follow-up Proposals, for example a pin-connection repair suggestion. They do not execute follow-up edits automatically.
 
