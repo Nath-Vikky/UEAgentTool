@@ -199,6 +199,23 @@ These fields help the backend create safer follow-up Proposals, for example a pi
 
 When the backend returns `editor_operation_result_summary` or `editor_operation_follow_ups` blocks, User View now expands the most useful fields into readable bullet points: execution state, Blueprint path, graph name, created node count, linked pin count, compile status, diagnostic flags, repair advice, and ready follow-up candidate counts. The full JSON is still available in Debug View.
 
+## Editor Operation Tool Catalog Quick View
+
+Agent Chat / Project QA includes a read-only `Show Tools` button. It calls:
+
+```text
+GET /api/v1/editor-operations/capabilities
+```
+
+The result is displayed as an `Editor Operations` system message with protocol,
+transport, proposal type, confirmed-write count, read-only inspection count,
+group counts, sample tools, and the current confirmation policy.
+
+`Show Tools` does not create a Proposal and does not execute any Unreal Editor
+API. It is only a user-facing catalog view so users can understand which
+operations are available before asking the Agent to prepare a confirmed
+editor-operation Proposal.
+
 ## Highlights Window
 
 User View 不再直接把 summary、issues、recommendations 等高亮信息塞进主聊天区域。任务完成后，主面板只显示一条结果摘要，点击“打开高亮”可在独立窗口查看完整高亮内容。

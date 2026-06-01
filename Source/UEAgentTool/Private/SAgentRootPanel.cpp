@@ -804,6 +804,124 @@ namespace UEAgentRootPanelPrivate
 		return DisplayedCount > 0;
 	}
 
+	static bool BuildEditorOperationCapabilitiesMessage(const TSharedPtr<FJsonObject>& ResponseObject, FString& OutMessage, FString& OutStatus)
+	{
+		const TSharedPtr<FJsonObject> CapabilitiesObject = GetObjectField(ResponseObject, TEXT("capabilities"));
+		if (!CapabilitiesObject.IsValid())
+		{
+			OutMessage = TEXT("Editor operation capabilities response did not include a capabilities object.");
+			OutStatus = TEXT("Editor operation tools are unavailable.");
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject> SummaryObject = GetObjectField(CapabilitiesObject, TEXT("summary"));
+		const TSharedPtr<FJsonObject> SafetyObject = GetObjectField(CapabilitiesObject, TEXT("safety_policy"));
+		const FString ProtocolVersion = GetScalarFieldAsString(CapabilitiesObject, TEXT("protocol_version"));
+		const FString Transport = GetScalarFieldAsString(CapabilitiesObject, TEXT("transport"));
+		const FString ProposalType = GetScalarFieldAsString(CapabilitiesObject, TEXT("proposal_type"));
+
+		auto CountArrayField = [](const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName) -> int32
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+			return JsonObject.IsValid() && JsonObject->TryGetArrayField(FieldName, Values) && Values != nullptr
+				? Values->Num()
+				: 0;
+		};
+
+		auto PreviewOperationItems = [](const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, const int32 MaxItems) -> FString
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+			if (!JsonObject.IsValid() || !JsonObject->TryGetArrayField(FieldName, Values) || Values == nullptr || Values->Num() == 0)
+			{
+				return TEXT("none");
+			}
+
+			TArray<FString> Parts;
+			for (const TSharedPtr<FJsonValue>& Value : *Values)
+			{
+				const TSharedPtr<FJsonObject> ItemObject = Value.IsValid() ? Value->AsObject() : nullptr;
+				if (!ItemObject.IsValid())
+				{
+					continue;
+				}
+
+				FString Title = FirstNonEmptyString(ItemObject, { TEXT("title"), TEXT("operation_type"), TEXT("tool_id") });
+				const FString OperationType = GetScalarFieldAsString(ItemObject, TEXT("operation_type"));
+				const FString SideEffect = GetScalarFieldAsString(ItemObject, TEXT("side_effect_level"));
+				if (Title.IsEmpty())
+				{
+					Title = TEXT("operation");
+				}
+				if (!OperationType.IsEmpty() && !Title.Contains(*OperationType))
+				{
+					Title += FString::Printf(TEXT(" (%s)"), *OperationType);
+				}
+				if (!SideEffect.IsEmpty())
+				{
+					Title += FString::Printf(TEXT("<%s>"), *SideEffect);
+				}
+				Parts.Add(Title);
+				if (Parts.Num() >= MaxItems)
+				{
+					break;
+				}
+			}
+			if (Values->Num() > Parts.Num())
+			{
+				Parts.Add(FString::Printf(TEXT("+%d more"), Values->Num() - Parts.Num()));
+			}
+			return Parts.Num() > 0 ? FString::Join(Parts, TEXT(", ")) : FString(TEXT("none"));
+		};
+
+		TArray<FString> Lines;
+		Lines.Add(TEXT("Editor Operation Tool Catalog"));
+		Lines.Add(FString::Printf(TEXT("- protocol=%s transport=%s proposal_type=%s"),
+			*(ProtocolVersion.IsEmpty() ? FString(TEXT("unknown")) : ProtocolVersion),
+			*(Transport.IsEmpty() ? FString(TEXT("unknown")) : Transport),
+			*(ProposalType.IsEmpty() ? FString(TEXT("unknown")) : ProposalType)));
+		Lines.Add(FString::Printf(TEXT("- confirmed_write=%d implemented_frontend=%d read_only=%d roadmap=%d groups=%d"),
+			GetIntegerFieldOrZero(SummaryObject, TEXT("operation_count")),
+			GetIntegerFieldOrZero(SummaryObject, TEXT("implemented_frontend_count")),
+			GetIntegerFieldOrZero(SummaryObject, TEXT("read_only_operation_count")),
+			GetIntegerFieldOrZero(SummaryObject, TEXT("roadmap_operation_count")),
+			GetIntegerFieldOrZero(SummaryObject, TEXT("group_count"))));
+		Lines.Add(FString::Printf(TEXT("- safety: llm_direct_execution=%s confirmation=%s frontend_executes=%s auto_save=%s"),
+			*GetScalarFieldAsString(SafetyObject, TEXT("llm_direct_execution")),
+			*GetScalarFieldAsString(SafetyObject, TEXT("requires_frontend_confirmation")),
+			*GetScalarFieldAsString(SafetyObject, TEXT("ue_plugin_executes_editor_api")),
+			*GetScalarFieldAsString(SafetyObject, TEXT("auto_save"))));
+		Lines.Add(FString::Printf(TEXT("- status_counts: %s"), *FormatScalarObjectPreview(GetObjectField(SummaryObject, TEXT("frontend_status_counts")), TEXT("none"), 8)));
+		Lines.Add(FString::Printf(TEXT("- risk_counts: %s"), *FormatScalarObjectPreview(GetObjectField(SummaryObject, TEXT("risk_flag_counts")), TEXT("none"), 8)));
+
+		const TArray<TSharedPtr<FJsonValue>>* GroupValues = nullptr;
+		if (CapabilitiesObject->TryGetArrayField(TEXT("groups"), GroupValues) && GroupValues != nullptr && GroupValues->Num() > 0)
+		{
+			Lines.Add(TEXT("Groups:"));
+			for (const TSharedPtr<FJsonValue>& GroupValue : *GroupValues)
+			{
+				const TSharedPtr<FJsonObject> GroupObject = GroupValue.IsValid() ? GroupValue->AsObject() : nullptr;
+				if (!GroupObject.IsValid())
+				{
+					continue;
+				}
+				const FString Title = FirstNonEmptyString(GroupObject, { TEXT("title"), TEXT("group_id") });
+				Lines.Add(FString::Printf(TEXT("- %s | write=%d read_only=%d roadmap=%d"),
+					*(Title.IsEmpty() ? FString(TEXT("Group")) : Title),
+					GetIntegerFieldOrZero(GroupObject, TEXT("operation_count")),
+					GetIntegerFieldOrZero(GroupObject, TEXT("read_only_count")),
+					GetIntegerFieldOrZero(GroupObject, TEXT("roadmap_count"))));
+			}
+		}
+
+		Lines.Add(FString::Printf(TEXT("Confirmed-write examples: %s"), *PreviewOperationItems(CapabilitiesObject, TEXT("items"), 8)));
+		Lines.Add(FString::Printf(TEXT("Read-only examples: %s"), *PreviewOperationItems(CapabilitiesObject, TEXT("read_only_items"), 6)));
+		Lines.Add(FString::Printf(TEXT("Total catalog entries: %d"), CountArrayField(CapabilitiesObject, TEXT("items")) + CountArrayField(CapabilitiesObject, TEXT("read_only_items")) + CountArrayField(CapabilitiesObject, TEXT("roadmap_items"))));
+
+		OutMessage = FString::Join(Lines, TEXT("\n"));
+		OutStatus = TEXT("Loaded Editor Operation tool catalog.");
+		return true;
+	}
+
 	static bool BuildEditorOperationActivityMessage(const TSharedPtr<FJsonObject>& DiagnosticsObject, const TSharedPtr<FJsonObject>& HistoryObject, FString& OutMessage, FString& OutStatus)
 	{
 		const TSharedPtr<FJsonObject> DiagnosticsSummary = GetObjectField(DiagnosticsObject, TEXT("summary"));
@@ -6819,6 +6937,27 @@ void SAgentRootPanel::ShowMaterialInstances()
 	});
 }
 
+void SAgentRootPanel::ShowEditorOperationCapabilities()
+{
+	StateStore->SetBusy(true, TEXT("Loading Editor Operation tools..."));
+	HttpClient->RequestEditorOperationCapabilities([StateStore = StateStore](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	{
+		StateStore->SetBusy(false);
+		if (!bSuccess || !JsonObject.IsValid())
+		{
+			StateStore->AppendSystemMessage(FString::Printf(TEXT("Editor Operation tools unavailable: %s"), *Message), TEXT("Editor Operations"));
+			return;
+		}
+
+		StateStore->ApplyEditorOperationCapabilitiesResponse(JsonObject);
+		FString ToolsMessage;
+		FString StatusMessage;
+		UEAgentRootPanelPrivate::BuildEditorOperationCapabilitiesMessage(JsonObject, ToolsMessage, StatusMessage);
+		StateStore->AppendSystemMessage(ToolsMessage, TEXT("Editor Operations"));
+		StateStore->SetStatusMessage(StatusMessage);
+	});
+}
+
 void SAgentRootPanel::ShowEditorOperationActivity()
 {
 	StateStore->SetBusy(true, TEXT("Loading Editor Operation activity..."));
@@ -9087,6 +9226,18 @@ TSharedRef<SWidget> SAgentRootPanel::BuildFunctionSpecificForm(const EUEAgentFun
 					.OnClicked_Lambda([this]()
 					{
 						ShowMaterialInstances();
+						return FReply::Handled();
+					})
+				]
+				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Show Tools")))
+					.ToolTipText(FText::FromString(TEXT("Show supported editor-operation tools, read-only inspections, groups, and confirmation policy.")))
+					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+					.OnClicked_Lambda([this]()
+					{
+						ShowEditorOperationCapabilities();
 						return FReply::Handled();
 					})
 				]
