@@ -50,6 +50,7 @@
 #include "IAssetTools.h"
 #include "InputAction.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_CustomEvent.h"
 #include "K2Node_EnhancedInputAction.h"
 #include "K2Node_Event.h"
 #include "K2Node_ExecutionSequence.h"
@@ -2780,6 +2781,7 @@ namespace UEAgentRootPanelPrivate
 		const FString VariableName = GetScalarFieldAsString(PayloadObject, TEXT("variable_name")).TrimStartAndEnd();
 		const FString VariableValue = GetScalarFieldAsString(PayloadObject, TEXT("variable_value"));
 		const FString FunctionName = GetScalarFieldAsString(PayloadObject, TEXT("function_name")).TrimStartAndEnd();
+		const FString CustomEventName = GetScalarFieldAsString(PayloadObject, TEXT("custom_event_name")).TrimStartAndEnd();
 		const FString InputActionPath = NormalizeAssetPackagePath(GetScalarFieldAsString(PayloadObject, TEXT("input_action_path")));
 		FString BranchPath = GetScalarFieldAsString(PayloadObject, TEXT("branch_path")).TrimStartAndEnd().ToLower();
 		const bool bConditionDefault = GetBoolFieldOrDefault(PayloadObject, TEXT("condition_default"), true);
@@ -2793,9 +2795,10 @@ namespace UEAgentRootPanelPrivate
 		const bool bIsGetVariableTemplate = TemplateId.Equals(TEXT("get_variable"), ESearchCase::IgnoreCase);
 		const bool bIsSetVariableTemplate = TemplateId.Equals(TEXT("set_variable"), ESearchCase::IgnoreCase);
 		const bool bIsCallFunctionTemplate = TemplateId.Equals(TEXT("call_function"), ESearchCase::IgnoreCase);
+		const bool bIsCustomEventPrintStringTemplate = TemplateId.Equals(TEXT("custom_event_print_string"), ESearchCase::IgnoreCase);
 		const bool bIsEnhancedInputActionEventTemplate = TemplateId.Equals(TEXT("enhanced_input_action_event"), ESearchCase::IgnoreCase);
 		const bool bIsEnhancedInputPrintStringTemplate = TemplateId.Equals(TEXT("enhanced_input_print_string"), ESearchCase::IgnoreCase);
-		const bool bUsesPrintString = bIsPrintStringTemplate || bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate || bIsDelayPrintStringTemplate || bIsEnhancedInputPrintStringTemplate;
+		const bool bUsesPrintString = bIsPrintStringTemplate || bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate || bIsDelayPrintStringTemplate || bIsCustomEventPrintStringTemplate || bIsEnhancedInputPrintStringTemplate;
 		TArray<FString> SequenceMessages;
 		const TArray<TSharedPtr<FJsonValue>>* MessageValues = nullptr;
 		if (PayloadObject.IsValid() && PayloadObject->TryGetArrayField(TEXT("messages"), MessageValues) && MessageValues != nullptr)
@@ -2832,10 +2835,10 @@ namespace UEAgentRootPanelPrivate
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("blueprint_path and template_id are required."));
 			return ExecutionResult;
 		}
-		if (!bIsPrintStringTemplate && !bIsBranchPrintStringTemplate && !bIsSequencePrintStringsTemplate && !bIsDelayPrintStringTemplate && !bIsGetVariableTemplate && !bIsSetVariableTemplate && !bIsCallFunctionTemplate && !bIsEnhancedInputActionEventTemplate && !bIsEnhancedInputPrintStringTemplate)
+		if (!bIsPrintStringTemplate && !bIsBranchPrintStringTemplate && !bIsSequencePrintStringsTemplate && !bIsDelayPrintStringTemplate && !bIsGetVariableTemplate && !bIsSetVariableTemplate && !bIsCallFunctionTemplate && !bIsCustomEventPrintStringTemplate && !bIsEnhancedInputActionEventTemplate && !bIsEnhancedInputPrintStringTemplate)
 		{
 			ExecutionResult.ExecutionState = TEXT("blocked");
-			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string, branch_print_string, sequence_print_strings, delay_print_string, get_variable, set_variable, call_function, enhanced_input_action_event, and enhanced_input_print_string are supported in v1."));
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_node_template_unsupported"), TEXT("Only print_string, branch_print_string, sequence_print_strings, delay_print_string, get_variable, set_variable, call_function, custom_event_print_string, enhanced_input_action_event, and enhanced_input_print_string are supported in v1."));
 			return ExecutionResult;
 		}
 		if ((bIsGetVariableTemplate || bIsSetVariableTemplate) && VariableName.IsEmpty())
@@ -2848,6 +2851,12 @@ namespace UEAgentRootPanelPrivate
 		{
 			ExecutionResult.ExecutionState = TEXT("blocked");
 			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("function_name_required"), TEXT("function_name is required for Blueprint function call templates."));
+			return ExecutionResult;
+		}
+		if (bIsCustomEventPrintStringTemplate && CustomEventName.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("custom_event_name_required"), TEXT("custom_event_name is required for the Custom Event -> PrintString template."));
 			return ExecutionResult;
 		}
 		if ((bIsEnhancedInputActionEventTemplate || bIsEnhancedInputPrintStringTemplate) && InputActionPath.IsEmpty())
@@ -3082,6 +3091,7 @@ namespace UEAgentRootPanelPrivate
 		UK2Node_CallFunction* DelayNode = nullptr;
 		UK2Node_CallFunction* CallNode = nullptr;
 		UK2Node_CallFunction* FunctionCallNode = nullptr;
+		UK2Node_CustomEvent* CustomEventNode = nullptr;
 		UK2Node_EnhancedInputAction* EnhancedInputActionNode = nullptr;
 		UK2Node_VariableGet* VariableGetNode = nullptr;
 		UK2Node_VariableSet* VariableSetNode = nullptr;
@@ -3182,6 +3192,25 @@ namespace UEAgentRootPanelPrivate
 			EnhancedInputActionNode->PostPlacedNewNode();
 			EnhancedInputActionNode->AllocateDefaultPins();
 		}
+		if (bIsCustomEventPrintStringTemplate)
+		{
+			CustomEventNode = NewObject<UK2Node_CustomEvent>(TargetGraph);
+			CustomEventNode->SetFlags(RF_Transactional);
+			CustomEventNode->CreateNewGuid();
+			CustomEventNode->CustomFunctionName = FBlueprintEditorUtils::FindUniqueKismetName(Blueprint, CustomEventName);
+			CustomEventNode->bIsEditable = true;
+			CustomEventNode->PostPlacedNewNode();
+			CustomEventNode->AllocateDefaultPins();
+			CustomEventNode->NodePosX = static_cast<int32>(NodePosition.X - 320.0);
+			CustomEventNode->NodePosY = static_cast<int32>(NodePosition.Y);
+			if (!NodeComment.IsEmpty())
+			{
+				CustomEventNode->NodeComment = NodeComment;
+				CustomEventNode->bCommentBubblePinned = true;
+				CustomEventNode->bCommentBubbleVisible = true;
+			}
+			TargetGraph->AddNode(CustomEventNode, true, true);
+		}
 		if (bIsDelayPrintStringTemplate)
 		{
 			DelayNode = NewObject<UK2Node_CallFunction>(TargetGraph);
@@ -3217,7 +3246,7 @@ namespace UEAgentRootPanelPrivate
 			CallNode->PostPlacedNewNode();
 			CallNode->AllocateDefaultPins();
 
-			CallNode->NodePosX = static_cast<int32>((bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate || bIsDelayPrintStringTemplate || bIsEnhancedInputPrintStringTemplate) ? NodePosition.X + 360.0 : NodePosition.X);
+			CallNode->NodePosX = static_cast<int32>((bIsBranchPrintStringTemplate || bIsSequencePrintStringsTemplate || bIsDelayPrintStringTemplate || bIsCustomEventPrintStringTemplate || bIsEnhancedInputPrintStringTemplate) ? NodePosition.X + 360.0 : NodePosition.X);
 			CallNode->NodePosY = static_cast<int32>(NodePosition.Y);
 			if (!NodeComment.IsEmpty())
 			{
@@ -3409,6 +3438,17 @@ namespace UEAgentRootPanelPrivate
 				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("EnhancedInput.Triggered -> PrintString.Execute failed."));
 			}
 		}
+		else if (bIsCustomEventPrintStringTemplate)
+		{
+			UEdGraphPin* CustomEventOutputPin = FindExecPin(CustomEventNode, EGPD_Output, UEdGraphSchema_K2::PN_Then);
+			UEdGraphPin* PrintInputPin = FindExecPin(CallNode, EGPD_Input, UEdGraphSchema_K2::PN_Execute);
+			bTemplateLinkSuccess = ConnectExecPins(CustomEventNode, CustomEventOutputPin, CallNode, PrintInputPin);
+			if (!bTemplateLinkSuccess)
+			{
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect Custom Event exec output to PrintString exec input."));
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("CustomEvent.Then -> PrintString.Execute failed."));
+			}
+		}
 		else if (bIsPrintStringTemplate && EntryEventNode != nullptr)
 		{
 			UEdGraphPin* SourceExecPin = FindExecPin(EntryEventNode, EGPD_Output, UEdGraphSchema_K2::PN_Then);
@@ -3474,6 +3514,10 @@ namespace UEAgentRootPanelPrivate
 		{
 			PrimaryCreatedNodeName = FunctionCallNode->GetName();
 		}
+		else if (CustomEventNode != nullptr)
+		{
+			PrimaryCreatedNodeName = CustomEventNode->GetName();
+		}
 		else if (EnhancedInputActionNode != nullptr)
 		{
 			PrimaryCreatedNodeName = EnhancedInputActionNode->GetName();
@@ -3497,6 +3541,10 @@ namespace UEAgentRootPanelPrivate
 		else if (FunctionCallNode != nullptr)
 		{
 			ExecutionResult.ResultObject->SetStringField(TEXT("created_node_id"), BlueprintNodeGuidString(FunctionCallNode));
+		}
+		else if (CustomEventNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("created_node_id"), BlueprintNodeGuidString(CustomEventNode));
 		}
 		else if (EnhancedInputActionNode != nullptr)
 		{
@@ -3545,6 +3593,11 @@ namespace UEAgentRootPanelPrivate
 			ExecutionResult.ResultObject->SetStringField(TEXT("function_name"), FunctionName);
 			ExecutionResult.ResultObject->SetStringField(TEXT("function_target"), TEXT("self"));
 			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("created_nodes"), FunctionCallNode, TEXT("function_call"));
+		}
+		if (CustomEventNode != nullptr)
+		{
+			ExecutionResult.ResultObject->SetStringField(TEXT("custom_event_name"), CustomEventNode->CustomFunctionName.ToString());
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("created_nodes"), CustomEventNode, TEXT("custom_event"));
 		}
 		if (EnhancedInputActionNode != nullptr)
 		{
@@ -3595,11 +3648,15 @@ namespace UEAgentRootPanelPrivate
 		{
 			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), FunctionCallNode, TEXT("function_call"));
 		}
+		if (CustomEventNode != nullptr && bIsCustomEventPrintStringTemplate)
+		{
+			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), CustomEventNode, TEXT("custom_event"));
+		}
 		if (EnhancedInputActionNode != nullptr && bIsEnhancedInputPrintStringTemplate)
 		{
 			AddBlueprintNodeResult(ExecutionResult.ResultObject, TEXT("linked_nodes"), EnhancedInputActionNode, TEXT("enhanced_input_action_event"));
 		}
-		if (EntryEventNode != nullptr || BranchNode != nullptr || SequenceNode != nullptr || DelayNode != nullptr || bIsEnhancedInputPrintStringTemplate)
+		if (EntryEventNode != nullptr || BranchNode != nullptr || SequenceNode != nullptr || DelayNode != nullptr || bIsCustomEventPrintStringTemplate || bIsEnhancedInputPrintStringTemplate)
 		{
 			for (UK2Node_CallFunction* PrintNode : PrintNodes)
 			{
@@ -3637,6 +3694,10 @@ namespace UEAgentRootPanelPrivate
 		{
 			SetAppliedField(ExecutionResult.ResultObject, TEXT("function_name"), FunctionName);
 			SetAppliedField(ExecutionResult.ResultObject, TEXT("function_target"), TEXT("self"));
+		}
+		if (CustomEventNode != nullptr)
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("custom_event_name"), CustomEventNode->CustomFunctionName.ToString());
 		}
 		if (EnhancedInputActionNode != nullptr)
 		{
