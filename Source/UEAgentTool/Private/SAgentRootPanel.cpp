@@ -2993,7 +2993,12 @@ namespace UEAgentRootPanelPrivate
 		}
 		if (TargetGraph == nullptr)
 		{
-			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_graph_unavailable"), GraphName);
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			ExecutionResult.ResultObject->SetStringField(TEXT("blueprint_path"), BlueprintPath);
+			ExecutionResult.ResultObject->SetStringField(TEXT("template_id"), TemplateId);
+			ExecutionResult.ResultObject->SetStringField(TEXT("graph_name"), GraphName);
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_graph_unavailable"), FString::Printf(TEXT("Blueprint graph `%s` is unavailable and could not be created for `%s`."), *GraphName, *BlueprintPath));
+			AddFailedField(ExecutionResult.ResultObject, TEXT("graph_name"), TEXT("Graph was not found or could not be created."));
 			return ExecutionResult;
 		}
 
@@ -3019,7 +3024,12 @@ namespace UEAgentRootPanelPrivate
 				|| EntryOwnerClass->FindFunctionByName(EntryFunctionName) == nullptr)
 			{
 				ExecutionResult.ExecutionState = TEXT("blocked");
-				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("entry_event_unsupported"), TEXT("Only BeginPlay is supported for Blueprint node template links in v1."));
+				ExecutionResult.ResultObject->SetStringField(TEXT("blueprint_path"), BlueprintPath);
+				ExecutionResult.ResultObject->SetStringField(TEXT("template_id"), TemplateId);
+				ExecutionResult.ResultObject->SetStringField(TEXT("graph_name"), TargetGraph->GetName());
+				ExecutionResult.ResultObject->SetStringField(TEXT("entry_event"), EntryEventName);
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("entry_event_unsupported"), TEXT("Allowed entry events for Blueprint template links: BeginPlay, ActorBeginOverlap, ActorEndOverlap."));
+				AddFailedField(ExecutionResult.ResultObject, TEXT("entry_event"), EntryEventName);
 				return ExecutionResult;
 			}
 
@@ -3333,15 +3343,32 @@ namespace UEAgentRootPanelPrivate
 			}
 			return nullptr;
 		};
-		auto ConnectExecPins = [&TargetGraph, &LinkedPinsSummaries, &LinkedPinObjects](UEdGraphNode* SourceNode, UEdGraphPin* SourcePin, UEdGraphNode* TargetNode, UEdGraphPin* TargetPin) -> bool
+		FString LastLinkFailureReason;
+		auto DescribeNodePin = [](UEdGraphNode* Node, UEdGraphPin* Pin) -> FString
 		{
+			return FString::Printf(TEXT("%s.%s"),
+				Node != nullptr ? *Node->GetName() : TEXT("<missing_node>"),
+				Pin != nullptr ? *Pin->PinName.ToString() : TEXT("<missing_pin>"));
+		};
+		auto ConnectExecPins = [&TargetGraph, &LinkedPinsSummaries, &LinkedPinObjects, &LastLinkFailureReason, &DescribeNodePin](UEdGraphNode* SourceNode, UEdGraphPin* SourcePin, UEdGraphNode* TargetNode, UEdGraphPin* TargetPin) -> bool
+		{
+			LastLinkFailureReason.Reset();
 			if (SourceNode == nullptr || SourcePin == nullptr || TargetNode == nullptr || TargetPin == nullptr)
 			{
+				LastLinkFailureReason = FString::Printf(TEXT("Missing node or exec pin while connecting %s -> %s."),
+					*DescribeNodePin(SourceNode, SourcePin),
+					*DescribeNodePin(TargetNode, TargetPin));
 				return false;
 			}
 			bool bLinked = SourcePin->LinkedTo.Contains(TargetPin);
-			if (!bLinked && (SourcePin->LinkedTo.Num() > 0 || TargetPin->LinkedTo.Num() > 0))
+			if (!bLinked && SourcePin->LinkedTo.Num() > 0)
 			{
+				LastLinkFailureReason = FString::Printf(TEXT("Source exec pin is already linked: %s."), *DescribeNodePin(SourceNode, SourcePin));
+				return false;
+			}
+			if (!bLinked && TargetPin->LinkedTo.Num() > 0)
+			{
+				LastLinkFailureReason = FString::Printf(TEXT("Target exec pin is already linked: %s."), *DescribeNodePin(TargetNode, TargetPin));
 				return false;
 			}
 			if (!bLinked)
@@ -3349,6 +3376,11 @@ namespace UEAgentRootPanelPrivate
 				if (const UEdGraphSchema* Schema = TargetGraph != nullptr ? TargetGraph->GetSchema() : nullptr)
 				{
 					bLinked = Schema->TryCreateConnection(SourcePin, TargetPin);
+				}
+				else
+				{
+					LastLinkFailureReason = TEXT("Target graph schema is unavailable.");
+					return false;
 				}
 			}
 			if (bLinked)
@@ -3360,7 +3392,17 @@ namespace UEAgentRootPanelPrivate
 					*TargetPin->PinName.ToString()));
 				LinkedPinObjects.Add(MakeBlueprintPinLinkResultObject(SourceNode, SourcePin, TargetNode, TargetPin));
 			}
+			else
+			{
+				LastLinkFailureReason = FString::Printf(TEXT("UE graph schema rejected exec pin connection: %s -> %s."),
+					*DescribeNodePin(SourceNode, SourcePin),
+					*DescribeNodePin(TargetNode, TargetPin));
+			}
 			return bLinked;
+		};
+		auto LinkFailureDetail = [&LastLinkFailureReason](const TCHAR* Fallback) -> FString
+		{
+			return LastLinkFailureReason.IsEmpty() ? FString(Fallback) : LastLinkFailureReason;
 		};
 
 		bool bTemplateLinkSuccess = EntryEventName.IsEmpty();
@@ -3381,8 +3423,9 @@ namespace UEAgentRootPanelPrivate
 			bTemplateLinkSuccess = bEntryToBranchLinked && bBranchToPrintLinked;
 			if (!bTemplateLinkSuccess)
 			{
-				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay -> Branch -> PrintString exec chain."));
-				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay -> Branch -> PrintString failed."));
+				const FString Detail = LinkFailureDetail(TEXT("EntryEvent -> Branch -> PrintString failed."));
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), Detail);
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), Detail);
 			}
 		}
 		else if (bIsSequencePrintStringsTemplate)
@@ -3404,8 +3447,9 @@ namespace UEAgentRootPanelPrivate
 			bTemplateLinkSuccess = bEntryToSequenceLinked && bSequenceOutputsLinked;
 			if (!bTemplateLinkSuccess)
 			{
-				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay -> Sequence -> PrintString exec chain."));
-				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay -> Sequence -> PrintString failed."));
+				const FString Detail = LinkFailureDetail(TEXT("EntryEvent -> Sequence -> PrintString failed."));
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), Detail);
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), Detail);
 			}
 		}
 		else if (bIsDelayPrintStringTemplate)
@@ -3423,8 +3467,9 @@ namespace UEAgentRootPanelPrivate
 			bTemplateLinkSuccess = bEntryToDelayLinked && bDelayToPrintLinked;
 			if (!bTemplateLinkSuccess)
 			{
-				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay -> Delay -> PrintString exec chain."));
-				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay -> Delay -> PrintString failed."));
+				const FString Detail = LinkFailureDetail(TEXT("EntryEvent -> Delay -> PrintString failed."));
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), Detail);
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), Detail);
 			}
 		}
 		else if (bIsEnhancedInputPrintStringTemplate)
@@ -3434,8 +3479,9 @@ namespace UEAgentRootPanelPrivate
 			bTemplateLinkSuccess = ConnectExecPins(EnhancedInputActionNode, InputActionOutputPin, CallNode, PrintInputPin);
 			if (!bTemplateLinkSuccess)
 			{
-				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect Enhanced Input Triggered exec output to PrintString exec input."));
-				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("EnhancedInput.Triggered -> PrintString.Execute failed."));
+				const FString Detail = LinkFailureDetail(TEXT("EnhancedInput.Triggered -> PrintString.Execute failed."));
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), Detail);
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), Detail);
 			}
 		}
 		else if (bIsCustomEventPrintStringTemplate)
@@ -3445,8 +3491,9 @@ namespace UEAgentRootPanelPrivate
 			bTemplateLinkSuccess = ConnectExecPins(CustomEventNode, CustomEventOutputPin, CallNode, PrintInputPin);
 			if (!bTemplateLinkSuccess)
 			{
-				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect Custom Event exec output to PrintString exec input."));
-				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("CustomEvent.Then -> PrintString.Execute failed."));
+				const FString Detail = LinkFailureDetail(TEXT("CustomEvent.Then -> PrintString.Execute failed."));
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), Detail);
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), Detail);
 			}
 		}
 		else if (bIsPrintStringTemplate && EntryEventNode != nullptr)
@@ -3456,8 +3503,9 @@ namespace UEAgentRootPanelPrivate
 			bTemplateLinkSuccess = ConnectExecPins(EntryEventNode, SourceExecPin, CallNode, TargetExecPin);
 			if (!bTemplateLinkSuccess)
 			{
-				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay exec output to PrintString exec input."));
-				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay.Then -> PrintString.Execute failed."));
+				const FString Detail = LinkFailureDetail(TEXT("EntryEvent.Then -> PrintString.Execute failed."));
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), Detail);
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), Detail);
 			}
 		}
 		else if (bIsSetVariableTemplate && EntryEventNode != nullptr)
@@ -3467,8 +3515,9 @@ namespace UEAgentRootPanelPrivate
 			bTemplateLinkSuccess = ConnectExecPins(EntryEventNode, SourceExecPin, VariableSetNode, TargetExecPin);
 			if (!bTemplateLinkSuccess)
 			{
-				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay exec output to Set Variable exec input."));
-				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay.Then -> SetVariable.Execute failed."));
+				const FString Detail = LinkFailureDetail(TEXT("EntryEvent.Then -> SetVariable.Execute failed."));
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), Detail);
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), Detail);
 			}
 		}
 		else if (bIsCallFunctionTemplate && EntryEventNode != nullptr)
@@ -3478,8 +3527,9 @@ namespace UEAgentRootPanelPrivate
 			bTemplateLinkSuccess = ConnectExecPins(EntryEventNode, SourceExecPin, FunctionCallNode, TargetExecPin);
 			if (!bTemplateLinkSuccess)
 			{
-				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), TEXT("Could not connect BeginPlay exec output to CallFunction exec input."));
-				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), TEXT("BeginPlay.Then -> CallFunction.Execute failed."));
+				const FString Detail = LinkFailureDetail(TEXT("EntryEvent.Then -> CallFunction.Execute failed."));
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_template_link_failed"), Detail);
+				AddFailedField(ExecutionResult.ResultObject, TEXT("linked_pins"), Detail);
 			}
 		}
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
@@ -3491,6 +3541,12 @@ namespace UEAgentRootPanelPrivate
 			FKismetEditorUtilities::CompileBlueprint(Blueprint);
 			CompileStatus = BlueprintStatusToOperationString(Blueprint->Status);
 			bCompileSuccess = Blueprint->Status != BS_Error;
+			if (!bCompileSuccess)
+			{
+				const FString Detail = FString::Printf(TEXT("Blueprint compile failed with status `%s`. Open the Blueprint compiler messages for details."), *CompileStatus);
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("blueprint_compile_failed"), Detail);
+				AddFailedField(ExecutionResult.ResultObject, TEXT("compile_status"), Detail);
+			}
 		}
 
 		ExecutionResult.bSuccess = bCompileSuccess && bTemplateLinkSuccess;

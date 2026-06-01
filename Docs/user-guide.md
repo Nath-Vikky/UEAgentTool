@@ -197,6 +197,7 @@ Blueprint graph operations now report richer result data back to the backend:
 - `custom_event_print_string` creates a no-parameter Custom Event and connects it to `PrintString`.
 - `delay_print_string` creates a bounded `BeginPlay -> Delay -> PrintString` template and reports `delay_seconds`.
 - `enhanced_input_print_string` creates an Enhanced Input Action event, creates `PrintString`, and attempts `Triggered -> Execute` without breaking existing links.
+- Failed Blueprint graph operations now include clearer `errors[]` and `failed_fields[]` details for missing pins, occupied pins, unavailable graph/schema data, or Blueprint compile failure.
 
 These fields help the backend create safer follow-up Proposals, for example a pin-connection repair suggestion. They do not execute follow-up edits automatically.
 
