@@ -3,13 +3,18 @@
 #include "AgentEditorToolServer.h"
 
 #include "AgentEditorToolCatalog.h"
+#include "Editor.h"
 #include "Async/Async.h"
 #include "Blueprint/WidgetTree.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "Engine/Blueprint.h"
+#include "Engine/Level.h"
 #include "Engine/SCS_Node.h"
+#include "Engine/Selection.h"
 #include "Engine/SimpleConstructionScript.h"
+#include "Engine/World.h"
+#include "GameFramework/Actor.h"
 #include "Components/PanelSlot.h"
 #include "Components/Widget.h"
 #include "Common/TcpListener.h"
@@ -378,6 +383,71 @@ namespace UEAgentEditorToolServerPrivate
 				break;
 			}
 		}
+	}
+
+	static TSharedPtr<FJsonObject> BuildEditorContextSnapshot(const FString& ServerStatus)
+	{
+		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
+		SnapshotObject->SetStringField(TEXT("context_schema_version"), TEXT("ue_agent_editor_context_v1"));
+		SnapshotObject->SetStringField(TEXT("transport"), TEXT("tcp_jsonrpc_line"));
+		SnapshotObject->SetStringField(TEXT("server_status"), ServerStatus);
+		SnapshotObject->SetBoolField(TEXT("http_proposal_flow_required_for_writes"), true);
+
+		const TArray<FUEAgentEditorToolDefinition> Definitions = FUEAgentEditorToolCatalog::BuildCoreEditorOperationDefinitions();
+		int32 ReadOnlyToolCount = 0;
+		int32 ConfirmedWriteToolCount = 0;
+		TMap<FString, int32> CategoryCounts;
+		TArray<FString> ReadOnlyToolNames;
+		for (const FUEAgentEditorToolDefinition& Definition : Definitions)
+		{
+			if (Definition.SideEffectLevel == TEXT("read_only"))
+			{
+				++ReadOnlyToolCount;
+				ReadOnlyToolNames.Add(Definition.OperationType);
+			}
+			else
+			{
+				++ConfirmedWriteToolCount;
+			}
+			int32& Count = CategoryCounts.FindOrAdd(Definition.Category);
+			++Count;
+		}
+
+		TSharedPtr<FJsonObject> CategoryCountsObject = MakeShared<FJsonObject>();
+		for (const TPair<FString, int32>& Item : CategoryCounts)
+		{
+			CategoryCountsObject->SetNumberField(Item.Key, Item.Value);
+		}
+
+		TSharedPtr<FJsonObject> ToolSummaryObject = MakeShared<FJsonObject>();
+		ToolSummaryObject->SetNumberField(TEXT("tool_count"), Definitions.Num());
+		ToolSummaryObject->SetNumberField(TEXT("read_only_tool_count"), ReadOnlyToolCount);
+		ToolSummaryObject->SetNumberField(TEXT("confirmed_write_tool_count"), ConfirmedWriteToolCount);
+		ToolSummaryObject->SetArrayField(TEXT("read_only_tools"), StringsToJsonArray(ReadOnlyToolNames));
+		ToolSummaryObject->SetObjectField(TEXT("category_counts"), CategoryCountsObject);
+		SnapshotObject->SetObjectField(TEXT("tool_summary"), ToolSummaryObject);
+
+		TSharedPtr<FJsonObject> EditorWorldObject = MakeShared<FJsonObject>();
+		EditorWorldObject->SetBoolField(TEXT("editor_available"), GEditor != nullptr);
+		EditorWorldObject->SetNumberField(TEXT("selected_actor_count"), GEditor != nullptr ? GEditor->GetSelectedActorCount() : 0);
+		UWorld* EditorWorld = GEditor != nullptr ? GEditor->GetEditorWorldContext().World() : nullptr;
+		if (EditorWorld != nullptr)
+		{
+			EditorWorldObject->SetStringField(TEXT("world_name"), EditorWorld->GetName());
+			EditorWorldObject->SetStringField(TEXT("map_name"), EditorWorld->GetMapName());
+			if (EditorWorld->GetCurrentLevel() != nullptr)
+			{
+				EditorWorldObject->SetStringField(TEXT("current_level_name"), EditorWorld->GetCurrentLevel()->GetOuter()->GetName());
+			}
+			EditorWorldObject->SetBoolField(TEXT("is_game_world"), EditorWorld->IsGameWorld());
+		}
+		else
+		{
+			EditorWorldObject->SetStringField(TEXT("world_name"), TEXT(""));
+			EditorWorldObject->SetStringField(TEXT("map_name"), TEXT(""));
+		}
+		SnapshotObject->SetObjectField(TEXT("editor_world"), EditorWorldObject);
+		return SnapshotObject;
 	}
 
 	static TSharedPtr<FJsonObject> BuildBlueprintGraphSnapshot(const FString& BlueprintPath)
@@ -797,6 +867,10 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 		ResultObject->SetObjectField(TEXT("structuredContent"), FUEAgentEditorToolCatalog::BuildToolsListJson());
 		return ResultObject;
 	}
+	if (ToolName.Equals(TEXT("get_editor_context"), ESearchCase::IgnoreCase))
+	{
+		return BuildEditorContextResult();
+	}
 	if (ToolName.Equals(TEXT("get_blueprint_graph"), ESearchCase::IgnoreCase))
 	{
 		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
@@ -831,6 +905,45 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 	return ResultObject;
 }
 
+TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildEditorContextResult() const
+{
+	TSharedPtr<FJsonObject> SnapshotObject;
+	const FString ServerStatus = GetStatusText();
+	if (IsInGameThread())
+	{
+		SnapshotObject = UEAgentEditorToolServerPrivate::BuildEditorContextSnapshot(ServerStatus);
+	}
+	else
+	{
+		FEvent* CompletionEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [ServerStatus, &SnapshotObject, CompletionEvent]()
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::BuildEditorContextSnapshot(ServerStatus);
+			CompletionEvent->Trigger();
+		});
+		const bool bCompleted = CompletionEvent->Wait(FTimespan::FromSeconds(3));
+		FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		if (!bCompleted)
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading live editor context on the game thread."));
+		}
+	}
+
+	TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ContentValues;
+	TSharedPtr<FJsonObject> TextContent = MakeShared<FJsonObject>();
+	TextContent->SetStringField(TEXT("type"), TEXT("text"));
+	TextContent->SetStringField(TEXT("text"), SerializeJsonObject(SnapshotObject));
+	ContentValues.Add(MakeShared<FJsonValueObject>(TextContent));
+	ResultObject->SetArrayField(TEXT("content"), ContentValues);
+	const TSharedPtr<FJsonObject> StructuredObject = SnapshotObject.IsValid() ? SnapshotObject : MakeShared<FJsonObject>();
+	ResultObject->SetObjectField(TEXT("structuredContent"), StructuredObject);
+	if (SnapshotObject.IsValid() && SnapshotObject->HasField(TEXT("reason")))
+	{
+		ResultObject->SetBoolField(TEXT("isError"), true);
+	}
+	return ResultObject;
+}
 TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildBlueprintGraphResult(const FString& BlueprintPath) const
 {
 	TSharedPtr<FJsonObject> SnapshotObject;

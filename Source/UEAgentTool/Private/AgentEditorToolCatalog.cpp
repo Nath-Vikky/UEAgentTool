@@ -121,6 +121,14 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("blueprint_path") },
 		{ TEXT("compile_mode") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("get_editor_context")),
+		TEXT("get_editor_context"),
+		TEXT("Read lightweight live Unreal Editor context through the optional TCP tool server."),
+		TEXT("editor"),
+		{},
+		{},
+		TEXT("read_only")));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("get_blueprint_graph")),
 		TEXT("get_blueprint_graph"),
 		TEXT("Read Blueprint graph metadata through the optional TCP tool server."),
