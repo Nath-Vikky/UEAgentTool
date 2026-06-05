@@ -923,6 +923,96 @@ namespace UEAgentRootPanelPrivate
 		return true;
 	}
 
+	static bool BuildToolManifestWorkflowPreviewMessage(const TSharedPtr<FJsonObject>& ResponseObject, FString& OutMessage, FString& OutStatus)
+	{
+		const TSharedPtr<FJsonObject> ManifestObject = GetObjectField(ResponseObject, TEXT("manifest"));
+		const TSharedPtr<FJsonObject> ProfilesObject = GetObjectField(ManifestObject, TEXT("profiles"));
+		const TArray<TSharedPtr<FJsonValue>>* PreviewValues = nullptr;
+		if (!ProfilesObject.IsValid() || !ProfilesObject->TryGetArrayField(TEXT("workflow_previews"), PreviewValues) || PreviewValues == nullptr || PreviewValues->Num() == 0)
+		{
+			OutMessage = TEXT("Tool workflow preview is unavailable.");
+			OutStatus = TEXT("Tool workflow preview unavailable.");
+			return false;
+		}
+
+		auto PreviewStringArrayField = [](const TSharedPtr<FJsonObject>& JsonObject, const TCHAR* FieldName, const int32 MaxItems) -> FString
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+			if (!JsonObject.IsValid() || !JsonObject->TryGetArrayField(FieldName, Values) || Values == nullptr || Values->Num() == 0)
+			{
+				return TEXT("none");
+			}
+
+			TArray<FString> Parts;
+			for (const TSharedPtr<FJsonValue>& Value : *Values)
+			{
+				const FString Text = Value.IsValid() ? Value->AsString() : FString();
+				if (!Text.IsEmpty())
+				{
+					Parts.Add(Text);
+				}
+				if (Parts.Num() >= MaxItems)
+				{
+					break;
+				}
+			}
+			if (Values->Num() > Parts.Num())
+			{
+				Parts.Add(FString::Printf(TEXT("+%d more"), Values->Num() - Parts.Num()));
+			}
+			return Parts.Num() > 0 ? FString::Join(Parts, TEXT(", ")) : FString(TEXT("none"));
+		};
+
+		TArray<FString> Lines;
+		Lines.Add(TEXT("Suggested Tool Workflows"));
+		Lines.Add(TEXT("- Recommended path: observe editor facts -> set optional context -> create Proposal -> confirm in UE."));
+		int32 DisplayedCount = 0;
+		for (const TSharedPtr<FJsonValue>& PreviewValue : *PreviewValues)
+		{
+			const TSharedPtr<FJsonObject> PreviewObject = PreviewValue.IsValid() ? PreviewValue->AsObject() : nullptr;
+			if (!PreviewObject.IsValid())
+			{
+				continue;
+			}
+
+			const FString ProfileId = FirstNonEmptyString(PreviewObject, { TEXT("profile_id"), TEXT("workflow_id") });
+			const FString Title = FirstNonEmptyString(PreviewObject, { TEXT("title"), TEXT("workflow_id") });
+			const FString Summary = GetScalarFieldAsString(PreviewObject, TEXT("summary"));
+			Lines.Add(FString::Printf(TEXT("- %s: %s"),
+				*(ProfileId.IsEmpty() ? FString(TEXT("profile")) : ProfileId),
+				*(Title.IsEmpty() ? FString(TEXT("workflow")) : Title)));
+			if (!Summary.IsEmpty())
+			{
+				Lines.Add(FString::Printf(TEXT("  %s"), *Summary));
+			}
+			Lines.Add(FString::Printf(TEXT("  observe=%s | context=%s | proposal=%s"),
+				*PreviewStringArrayField(PreviewObject, TEXT("observe_tools"), 3),
+				*PreviewStringArrayField(PreviewObject, TEXT("context_tools"), 3),
+				*PreviewStringArrayField(PreviewObject, TEXT("proposal_tools"), 3)));
+			const FString HappyPath = PreviewStringArrayField(PreviewObject, TEXT("happy_path"), 3);
+			if (HappyPath != TEXT("none"))
+			{
+				Lines.Add(FString::Printf(TEXT("  path=%s"), *HappyPath));
+			}
+			++DisplayedCount;
+			if (DisplayedCount >= 6)
+			{
+				break;
+			}
+		}
+
+		if (DisplayedCount == 0)
+		{
+			OutMessage = TEXT("Tool workflow preview did not include any displayable workflows.");
+			OutStatus = TEXT("Tool workflow preview unavailable.");
+			return false;
+		}
+
+		OutMessage = FString::Join(Lines, TEXT("\n"));
+		OutStatus = FString::Printf(TEXT("Loaded %d suggested tool workflows."), DisplayedCount);
+		return true;
+	}
+
 	static bool BuildEditorOperationActivityMessage(const TSharedPtr<FJsonObject>& DiagnosticsObject, const TSharedPtr<FJsonObject>& HistoryObject, FString& OutMessage, FString& OutStatus)
 	{
 		const TSharedPtr<FJsonObject> DiagnosticsSummary = GetObjectField(DiagnosticsObject, TEXT("summary"));
@@ -7073,11 +7163,12 @@ void SAgentRootPanel::ShowMaterialInstances()
 void SAgentRootPanel::ShowEditorOperationCapabilities()
 {
 	StateStore->SetBusy(true, TEXT("Loading Editor Operation tools..."));
-	HttpClient->RequestEditorOperationCapabilities([StateStore = StateStore](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	TSharedPtr<FUEAgentHttpClient> Client = HttpClient;
+	Client->RequestEditorOperationCapabilities([StateStore = StateStore, Client](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
 	{
-		StateStore->SetBusy(false);
 		if (!bSuccess || !JsonObject.IsValid())
 		{
+			StateStore->SetBusy(false);
 			StateStore->AppendSystemMessage(FString::Printf(TEXT("Editor Operation tools unavailable: %s"), *Message), TEXT("Editor Operations"));
 			return;
 		}
@@ -7087,10 +7178,29 @@ void SAgentRootPanel::ShowEditorOperationCapabilities()
 		FString StatusMessage;
 		UEAgentRootPanelPrivate::BuildEditorOperationCapabilitiesMessage(JsonObject, ToolsMessage, StatusMessage);
 		StateStore->AppendSystemMessage(ToolsMessage, TEXT("Editor Operations"));
-		StateStore->SetStatusMessage(StatusMessage);
+
+		Client->RequestToolRegistryManifest(TEXT("full"), [StateStore, StatusMessage](bool bManifestSuccess, const FString& ManifestMessage, const FString& ManifestRawText, TSharedPtr<FJsonObject> ManifestObject)
+		{
+			StateStore->SetBusy(false);
+			if (!bManifestSuccess || !ManifestObject.IsValid())
+			{
+				StateStore->SetStatusMessage(FString::Printf(TEXT("%s Workflow preview unavailable: %s"), *StatusMessage, *ManifestMessage));
+				return;
+			}
+
+			FString WorkflowMessage;
+			FString WorkflowStatus;
+			if (UEAgentRootPanelPrivate::BuildToolManifestWorkflowPreviewMessage(ManifestObject, WorkflowMessage, WorkflowStatus))
+			{
+				StateStore->AppendSystemMessage(WorkflowMessage, TEXT("Editor Operations"));
+				StateStore->SetStatusMessage(WorkflowStatus);
+				return;
+			}
+
+			StateStore->SetStatusMessage(StatusMessage);
+		});
 	});
 }
-
 void SAgentRootPanel::ShowEditorOperationActivity()
 {
 	StateStore->SetBusy(true, TEXT("Loading Editor Operation activity..."));

@@ -418,6 +418,12 @@ void FUEAgentHttpClient::RequestEditorOperationCapabilities(const FJsonResponseC
 	SendRequest(TEXT("GET"), TEXT("/api/v1/editor-operations/capabilities"), nullptr, Callback);
 }
 
+void FUEAgentHttpClient::RequestToolRegistryManifest(const FString& ProfileId, const FJsonResponseCallback& Callback) const
+{
+	const FString SafeProfileId = FGenericPlatformHttp::UrlEncode(ProfileId.IsEmpty() ? FString(TEXT("full")) : ProfileId);
+	SendRequest(TEXT("GET"), FString::Printf(TEXT("/api/v1/mcp/tool-registry/manifest?profile=%s"), *SafeProfileId), nullptr, Callback);
+}
+
 void FUEAgentHttpClient::RequestEditorOperationHistory(const int32 Limit, const FJsonResponseCallback& Callback) const
 {
 	const int32 SafeLimit = FMath::Clamp(Limit, 1, 200);
