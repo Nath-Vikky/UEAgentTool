@@ -19,6 +19,7 @@
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
@@ -866,6 +867,212 @@ namespace UEAgentEditorToolServerPrivate
 		return SnapshotObject;
 	}
 
+	static TArray<TSharedPtr<FJsonValue>> ActorTagsToJsonArray(const AActor* Actor)
+	{
+		TArray<TSharedPtr<FJsonValue>> TagValues;
+		if (Actor == nullptr)
+		{
+			return TagValues;
+		}
+		for (const FName& Tag : Actor->Tags)
+		{
+			TagValues.Add(MakeShared<FJsonValueString>(Tag.ToString()));
+			if (TagValues.Num() >= 32)
+			{
+				break;
+			}
+		}
+		return TagValues;
+	}
+
+	static FString ActorFolderPathText(const AActor* Actor)
+	{
+		if (Actor == nullptr)
+		{
+			return FString();
+		}
+#if WITH_EDITOR
+		return Actor->GetFolderPath().ToString();
+#else
+		return FString();
+#endif
+	}
+
+	static bool ActorHasTagText(const AActor* Actor, const FString& TagText)
+	{
+		if (Actor == nullptr || TagText.IsEmpty())
+		{
+			return true;
+		}
+		for (const FName& Tag : Actor->Tags)
+		{
+			if (Tag.ToString().Equals(TagText, ESearchCase::IgnoreCase))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool ActorMatchesLevelActorFilters(
+		const AActor* Actor,
+		const FString& Query,
+		const FString& ClassContains,
+		const FString& Tag,
+		const FString& FolderPath)
+	{
+		if (Actor == nullptr)
+		{
+			return false;
+		}
+		const FString ActorLabel = Actor->GetActorLabel();
+		const FString ActorName = Actor->GetName();
+		const FString ActorClass = Actor->GetClass() != nullptr ? Actor->GetClass()->GetPathName() : FString();
+		const FString ActorFolder = ActorFolderPathText(Actor);
+
+		if (!ClassContains.IsEmpty() && !ActorClass.Contains(ClassContains, ESearchCase::IgnoreCase))
+		{
+			return false;
+		}
+		if (!FolderPath.IsEmpty() && !ActorFolder.Contains(FolderPath, ESearchCase::IgnoreCase))
+		{
+			return false;
+		}
+		if (!ActorHasTagText(Actor, Tag))
+		{
+			return false;
+		}
+		if (Query.IsEmpty())
+		{
+			return true;
+		}
+		if (ActorLabel.Contains(Query, ESearchCase::IgnoreCase)
+			|| ActorName.Contains(Query, ESearchCase::IgnoreCase)
+			|| ActorClass.Contains(Query, ESearchCase::IgnoreCase)
+			|| ActorFolder.Contains(Query, ESearchCase::IgnoreCase))
+		{
+			return true;
+		}
+		for (const FName& ActorTag : Actor->Tags)
+		{
+			if (ActorTag.ToString().Contains(Query, ESearchCase::IgnoreCase))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static TSharedPtr<FJsonObject> BuildLevelActorSnapshot(AActor* Actor)
+	{
+		TSharedPtr<FJsonObject> ActorObject = MakeShared<FJsonObject>();
+		if (Actor == nullptr)
+		{
+			return ActorObject;
+		}
+		ActorObject->SetStringField(TEXT("actor_label"), Actor->GetActorLabel());
+		ActorObject->SetStringField(TEXT("actor_name"), Actor->GetName());
+		ActorObject->SetStringField(TEXT("actor_path"), Actor->GetPathName());
+		ActorObject->SetStringField(TEXT("actor_class"), Actor->GetClass() != nullptr ? Actor->GetClass()->GetPathName() : FString());
+		ActorObject->SetStringField(TEXT("folder_path"), ActorFolderPathText(Actor));
+		ActorObject->SetArrayField(TEXT("tags"), ActorTagsToJsonArray(Actor));
+		ActorObject->SetObjectField(TEXT("transform"), BuildTransformSnapshot(Actor->GetActorTransform()));
+
+		TArray<UActorComponent*> Components;
+		Actor->GetComponents(Components);
+		TArray<TSharedPtr<FJsonValue>> ComponentValues;
+		for (UActorComponent* Component : Components)
+		{
+			if (Component == nullptr)
+			{
+				continue;
+			}
+			ComponentValues.Add(MakeShared<FJsonValueObject>(BuildActorComponentSnapshot(Component)));
+			if (ComponentValues.Num() >= 16)
+			{
+				break;
+			}
+		}
+		ActorObject->SetNumberField(TEXT("component_count"), Components.Num());
+		ActorObject->SetNumberField(TEXT("max_components_returned"), 16);
+		ActorObject->SetArrayField(TEXT("components"), ComponentValues);
+		return ActorObject;
+	}
+
+	static TSharedPtr<FJsonObject> BuildLevelActorsSnapshot(const FString& ServerStatus, const TSharedPtr<FJsonObject>& ArgumentsObject)
+	{
+		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
+		SnapshotObject->SetStringField(TEXT("level_actor_schema_version"), TEXT("ue_agent_level_actors_v1"));
+		SnapshotObject->SetStringField(TEXT("transport"), TEXT("tcp_jsonrpc_line"));
+		SnapshotObject->SetStringField(TEXT("server_status"), ServerStatus);
+		SnapshotObject->SetBoolField(TEXT("editor_available"), GEditor != nullptr);
+
+		FString Query;
+		FString ClassContains;
+		FString Tag;
+		FString FolderPath;
+		double LimitNumber = 100.0;
+		if (ArgumentsObject.IsValid())
+		{
+			ArgumentsObject->TryGetStringField(TEXT("query"), Query);
+			ArgumentsObject->TryGetStringField(TEXT("class_contains"), ClassContains);
+			if (ClassContains.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("actor_class"), ClassContains);
+			}
+			ArgumentsObject->TryGetStringField(TEXT("tag"), Tag);
+			ArgumentsObject->TryGetStringField(TEXT("folder_path"), FolderPath);
+			ArgumentsObject->TryGetNumberField(TEXT("limit"), LimitNumber);
+		}
+		const int32 MaxActorsReturned = FMath::Clamp(FMath::RoundToInt(LimitNumber), 1, 300);
+
+		UWorld* EditorWorld = GEditor != nullptr ? GEditor->GetEditorWorldContext().World() : nullptr;
+		if (EditorWorld != nullptr)
+		{
+			SnapshotObject->SetStringField(TEXT("world_name"), EditorWorld->GetName());
+			SnapshotObject->SetStringField(TEXT("map_name"), EditorWorld->GetMapName());
+		}
+
+		TSharedPtr<FJsonObject> FiltersObject = MakeShared<FJsonObject>();
+		FiltersObject->SetStringField(TEXT("query"), Query);
+		FiltersObject->SetStringField(TEXT("class_contains"), ClassContains);
+		FiltersObject->SetStringField(TEXT("tag"), Tag);
+		FiltersObject->SetStringField(TEXT("folder_path"), FolderPath);
+		FiltersObject->SetNumberField(TEXT("limit"), MaxActorsReturned);
+		SnapshotObject->SetObjectField(TEXT("filters"), FiltersObject);
+
+		TArray<TSharedPtr<FJsonValue>> ActorValues;
+		int32 TotalActorCount = 0;
+		int32 MatchedActorCount = 0;
+		if (EditorWorld != nullptr)
+		{
+			for (TActorIterator<AActor> It(EditorWorld); It; ++It)
+			{
+				AActor* Actor = *It;
+				if (Actor == nullptr || Actor->IsTemplate())
+				{
+					continue;
+				}
+				++TotalActorCount;
+				if (!ActorMatchesLevelActorFilters(Actor, Query, ClassContains, Tag, FolderPath))
+				{
+					continue;
+				}
+				++MatchedActorCount;
+				if (ActorValues.Num() < MaxActorsReturned)
+				{
+					ActorValues.Add(MakeShared<FJsonValueObject>(BuildLevelActorSnapshot(Actor)));
+				}
+			}
+		}
+
+		SnapshotObject->SetNumberField(TEXT("total_actor_count"), TotalActorCount);
+		SnapshotObject->SetNumberField(TEXT("matched_actor_count"), MatchedActorCount);
+		SnapshotObject->SetNumberField(TEXT("max_actors_returned"), MaxActorsReturned);
+		SnapshotObject->SetArrayField(TEXT("actors"), ActorValues);
+		return SnapshotObject;
+	}
+
 	static TSharedPtr<FJsonObject> BuildBlueprintGraphSnapshot(const FString& BlueprintPath)
 	{
 		const FString NormalizedPath = NormalizeAssetPackagePath(BlueprintPath);
@@ -1344,6 +1551,12 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 	{
 		return BuildSelectedActorsResult();
 	}
+	if (ToolName.Equals(TEXT("get_level_actors"), ESearchCase::IgnoreCase))
+	{
+		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
+		const TSharedPtr<FJsonObject> ArgumentsObject = ParamsObject.IsValid() && ParamsObject->TryGetObjectField(TEXT("arguments"), ArgumentsField) && ArgumentsField != nullptr ? *ArgumentsField : nullptr;
+		return BuildLevelActorsResult(ArgumentsObject);
+	}
 	if (ToolName.Equals(TEXT("get_blueprint_graph"), ESearchCase::IgnoreCase))
 	{
 		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
@@ -1498,6 +1711,46 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildSelectedActorsResult() co
 		if (!bCompleted)
 		{
 			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading selected actors on the game thread."));
+		}
+	}
+
+	TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ContentValues;
+	TSharedPtr<FJsonObject> TextContent = MakeShared<FJsonObject>();
+	TextContent->SetStringField(TEXT("type"), TEXT("text"));
+	TextContent->SetStringField(TEXT("text"), SerializeJsonObject(SnapshotObject));
+	ContentValues.Add(MakeShared<FJsonValueObject>(TextContent));
+	ResultObject->SetArrayField(TEXT("content"), ContentValues);
+	const TSharedPtr<FJsonObject> StructuredObject = SnapshotObject.IsValid() ? SnapshotObject : MakeShared<FJsonObject>();
+	ResultObject->SetObjectField(TEXT("structuredContent"), StructuredObject);
+	if (SnapshotObject.IsValid() && SnapshotObject->HasField(TEXT("reason")))
+	{
+		ResultObject->SetBoolField(TEXT("isError"), true);
+	}
+	return ResultObject;
+}
+
+TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildLevelActorsResult(const TSharedPtr<FJsonObject>& ArgumentsObject) const
+{
+	TSharedPtr<FJsonObject> SnapshotObject;
+	const FString ServerStatus = GetStatusText();
+	if (IsInGameThread())
+	{
+		SnapshotObject = UEAgentEditorToolServerPrivate::BuildLevelActorsSnapshot(ServerStatus, ArgumentsObject);
+	}
+	else
+	{
+		FEvent* CompletionEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [ServerStatus, ArgumentsObject, &SnapshotObject, CompletionEvent]()
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::BuildLevelActorsSnapshot(ServerStatus, ArgumentsObject);
+			CompletionEvent->Trigger();
+		});
+		const bool bCompleted = CompletionEvent->Wait(FTimespan::FromSeconds(3));
+		FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		if (!bCompleted)
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading level actors on the game thread."));
 		}
 	}
 
