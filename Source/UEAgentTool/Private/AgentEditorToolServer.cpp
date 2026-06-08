@@ -1062,6 +1062,132 @@ namespace UEAgentEditorToolServerPrivate
 		SnapshotObject->SetArrayField(TEXT("assets"), AssetValues);
 		return SnapshotObject;
 	}
+
+	static TSharedPtr<FJsonObject> MakeAssetDataDetailsObject(const FAssetData& AssetData)
+	{
+		TSharedPtr<FJsonObject> AssetObject = MakeShared<FJsonObject>();
+		AssetObject->SetStringField(TEXT("asset_name"), AssetData.AssetName.ToString());
+		AssetObject->SetStringField(TEXT("asset_path"), AssetData.GetSoftObjectPath().ToString());
+		AssetObject->SetStringField(TEXT("asset_type"), AssetData.AssetClassPath.GetAssetName().ToString());
+		AssetObject->SetStringField(TEXT("asset_class"), AssetData.AssetClassPath.ToString());
+		AssetObject->SetStringField(TEXT("package_name"), AssetData.PackageName.ToString());
+		AssetObject->SetStringField(TEXT("package_path"), AssetData.PackagePath.ToString());
+
+		UObject* LoadedAsset = AssetData.GetAsset();
+		if (LoadedAsset != nullptr)
+		{
+			AssetObject->SetStringField(TEXT("object_path"), LoadedAsset->GetPathName());
+			AssetObject->SetStringField(TEXT("loaded_class"), LoadedAsset->GetClass() != nullptr ? LoadedAsset->GetClass()->GetPathName() : FString());
+			if (const UBlueprint* Blueprint = Cast<UBlueprint>(LoadedAsset))
+			{
+				AssetObject->SetStringField(TEXT("blueprint_parent_class"), Blueprint->ParentClass != nullptr ? Blueprint->ParentClass->GetPathName() : FString());
+			}
+			if (const UStaticMesh* StaticMesh = Cast<UStaticMesh>(LoadedAsset))
+			{
+				AddStaticMeshSelectedAssetDetails(StaticMesh, AssetObject);
+			}
+		}
+		return AssetObject;
+	}
+
+	static bool FindSelectedAssetData(FAssetData& OutAssetData)
+	{
+		if (!FModuleManager::Get().ModuleExists(TEXT("ContentBrowser")))
+		{
+			return false;
+		}
+
+		TArray<FAssetData> SelectedAssets;
+		FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+		ContentBrowserModule.Get().GetSelectedAssets(SelectedAssets);
+		for (const FAssetData& AssetData : SelectedAssets)
+		{
+			if (AssetData.IsValid())
+			{
+				OutAssetData = AssetData;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool FindAssetDataByQuery(const FString& Query, FAssetData& OutAssetData)
+	{
+		const FString Needle = Query.TrimStartAndEnd();
+		if (Needle.IsEmpty())
+		{
+			return false;
+		}
+
+		FString NormalizedPathOrQuery = Needle;
+		if (Needle.StartsWith(TEXT("/")))
+		{
+			NormalizedPathOrQuery = ToObjectPath(NormalizeAssetPackagePath(Needle));
+		}
+
+		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		FARFilter Filter;
+		Filter.PackagePaths.Add(FName(TEXT("/Game")));
+		Filter.bRecursivePaths = true;
+
+		TArray<FAssetData> AssetDataList;
+		AssetRegistryModule.Get().GetAssets(Filter, AssetDataList);
+		for (const FAssetData& AssetData : AssetDataList)
+		{
+			if (!AssetData.IsValid())
+			{
+				continue;
+			}
+			const FString AssetName = AssetData.AssetName.ToString();
+			const FString ObjectPath = AssetData.GetSoftObjectPath().ToString();
+			const FString PackageName = AssetData.PackageName.ToString();
+			if (AssetName.Equals(Needle, ESearchCase::IgnoreCase)
+				|| ObjectPath.Equals(NormalizedPathOrQuery, ESearchCase::IgnoreCase)
+				|| PackageName.Equals(NormalizeAssetPackagePath(Needle), ESearchCase::IgnoreCase)
+				|| AssetName.Contains(Needle, ESearchCase::IgnoreCase)
+				|| ObjectPath.Contains(Needle, ESearchCase::IgnoreCase))
+			{
+				OutAssetData = AssetData;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static TSharedPtr<FJsonObject> BuildAssetDetailsSnapshot(const FString& AssetPathOrQuery, const FString& ServerStatus)
+	{
+		FAssetData AssetData;
+		const FString Query = AssetPathOrQuery.TrimStartAndEnd();
+		bool bFound = false;
+		if (!Query.IsEmpty())
+		{
+			bFound = FindAssetDataByQuery(Query, AssetData);
+		}
+		if (!bFound)
+		{
+			bFound = FindSelectedAssetData(AssetData);
+		}
+		if (!bFound || !AssetData.IsValid())
+		{
+			return MakeToolErrorObject(TEXT("asset_not_found"), TEXT("No asset matched the provided path/query and no Content Browser asset is selected."));
+		}
+
+		TSharedPtr<FJsonObject> AssetObject = MakeAssetDataDetailsObject(AssetData);
+		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
+		SnapshotObject->SetStringField(TEXT("asset_detail_schema_version"), TEXT("ue_agent_asset_details_v1"));
+		SnapshotObject->SetStringField(TEXT("transport"), TEXT("tcp_jsonrpc_line"));
+		SnapshotObject->SetStringField(TEXT("server_status"), ServerStatus);
+		SnapshotObject->SetStringField(TEXT("requested_asset"), Query);
+		SnapshotObject->SetStringField(TEXT("resolved_from"), !Query.IsEmpty() ? TEXT("query_or_path") : TEXT("selected_content_browser_asset"));
+		SnapshotObject->SetStringField(TEXT("asset_name"), AssetData.AssetName.ToString());
+		SnapshotObject->SetStringField(TEXT("asset_path"), AssetData.GetSoftObjectPath().ToString());
+		SnapshotObject->SetStringField(TEXT("asset_type"), AssetData.AssetClassPath.GetAssetName().ToString());
+		SnapshotObject->SetStringField(TEXT("package_name"), AssetData.PackageName.ToString());
+		SnapshotObject->SetStringField(TEXT("package_path"), AssetData.PackagePath.ToString());
+		SnapshotObject->SetObjectField(TEXT("asset"), AssetObject);
+		return SnapshotObject;
+	}
+
 	static TSharedPtr<FJsonObject> BuildSelectedActorsSnapshot(const FString& ServerStatus)
 	{
 		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
@@ -2076,6 +2202,25 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 	{
 		return BuildSelectedAssetsResult();
 	}
+	if (ToolName.Equals(TEXT("get_asset_details"), ESearchCase::IgnoreCase))
+	{
+		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
+		const TSharedPtr<FJsonObject> ArgumentsObject = ParamsObject.IsValid() && ParamsObject->TryGetObjectField(TEXT("arguments"), ArgumentsField) && ArgumentsField != nullptr ? *ArgumentsField : nullptr;
+		FString AssetPathOrQuery;
+		if (ArgumentsObject.IsValid())
+		{
+			ArgumentsObject->TryGetStringField(TEXT("asset_path"), AssetPathOrQuery);
+			if (AssetPathOrQuery.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("asset_id"), AssetPathOrQuery);
+			}
+			if (AssetPathOrQuery.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("query"), AssetPathOrQuery);
+			}
+		}
+		return BuildAssetDetailsResult(AssetPathOrQuery);
+	}
 	if (ToolName.Equals(TEXT("get_static_mesh_details"), ESearchCase::IgnoreCase))
 	{
 		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
@@ -2311,6 +2456,46 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildSelectedAssetsResult() co
 		if (!bCompleted)
 		{
 			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading selected assets on the game thread."));
+		}
+	}
+
+	TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ContentValues;
+	TSharedPtr<FJsonObject> TextContent = MakeShared<FJsonObject>();
+	TextContent->SetStringField(TEXT("type"), TEXT("text"));
+	TextContent->SetStringField(TEXT("text"), SerializeJsonObject(SnapshotObject));
+	ContentValues.Add(MakeShared<FJsonValueObject>(TextContent));
+	ResultObject->SetArrayField(TEXT("content"), ContentValues);
+	const TSharedPtr<FJsonObject> StructuredObject = SnapshotObject.IsValid() ? SnapshotObject : MakeShared<FJsonObject>();
+	ResultObject->SetObjectField(TEXT("structuredContent"), StructuredObject);
+	if (SnapshotObject.IsValid() && SnapshotObject->HasField(TEXT("reason")))
+	{
+		ResultObject->SetBoolField(TEXT("isError"), true);
+	}
+	return ResultObject;
+}
+
+TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildAssetDetailsResult(const FString& AssetPathOrQuery) const
+{
+	TSharedPtr<FJsonObject> SnapshotObject;
+	const FString ServerStatus = GetStatusText();
+	if (IsInGameThread())
+	{
+		SnapshotObject = UEAgentEditorToolServerPrivate::BuildAssetDetailsSnapshot(AssetPathOrQuery, ServerStatus);
+	}
+	else
+	{
+		FEvent* CompletionEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [AssetPathOrQuery, ServerStatus, &SnapshotObject, CompletionEvent]()
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::BuildAssetDetailsSnapshot(AssetPathOrQuery, ServerStatus);
+			CompletionEvent->Trigger();
+		});
+		const bool bCompleted = CompletionEvent->Wait(FTimespan::FromSeconds(3));
+		FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		if (!bCompleted)
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading asset details on the game thread."));
 		}
 	}
 

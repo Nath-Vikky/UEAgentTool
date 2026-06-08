@@ -137,6 +137,14 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{},
 		TEXT("read_only")));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("get_asset_details")),
+		TEXT("get_asset_details"),
+		TEXT("Read one asset's live type, path, package, class, and basic details by path, query, or current selection."),
+		TEXT("asset"),
+		{},
+		{ TEXT("asset_path"), TEXT("asset_id"), TEXT("query") },
+		TEXT("read_only")));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("get_static_mesh_details")),
 		TEXT("get_static_mesh_details"),
 		TEXT("Read Static Mesh Nanite, LOD, collision, lightmap, and material slot details by path, query, or current selection."),

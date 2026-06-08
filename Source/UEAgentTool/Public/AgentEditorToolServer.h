@@ -32,6 +32,7 @@ private:
 	TSharedPtr<FJsonObject> BuildToolCallResult(const TSharedPtr<FJsonObject>& ParamsObject) const;
 	TSharedPtr<FJsonObject> BuildEditorContextResult() const;
 	TSharedPtr<FJsonObject> BuildSelectedAssetsResult() const;
+	TSharedPtr<FJsonObject> BuildAssetDetailsResult(const FString& AssetPathOrQuery) const;
 	TSharedPtr<FJsonObject> BuildSelectedActorsResult() const;
 	TSharedPtr<FJsonObject> BuildLevelActorsResult(const TSharedPtr<FJsonObject>& ArgumentsObject) const;
 	TSharedPtr<FJsonObject> BuildLevelActorDetailsResult(const FString& ActorReference) const;
