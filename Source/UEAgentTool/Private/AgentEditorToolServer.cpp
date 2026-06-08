@@ -23,8 +23,12 @@
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "Components/ActorComponent.h"
+#include "Components/CanvasPanelSlot.h"
+#include "Components/Image.h"
 #include "Components/SceneComponent.h"
 #include "Components/PanelSlot.h"
+#include "Components/PanelWidget.h"
+#include "Components/TextBlock.h"
 #include "Components/Widget.h"
 #include "Engine/Texture.h"
 #include "Common/TcpListener.h"
@@ -756,6 +760,14 @@ namespace UEAgentEditorToolServerPrivate
 		return Object;
 	}
 
+	static TSharedPtr<FJsonObject> BuildVector2DSnapshot(const FVector2D& Value)
+	{
+		TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+		Object->SetNumberField(TEXT("x"), Value.X);
+		Object->SetNumberField(TEXT("y"), Value.Y);
+		return Object;
+	}
+
 	static TSharedPtr<FJsonObject> BuildRotatorSnapshot(const FRotator& Value)
 	{
 		TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
@@ -774,6 +786,94 @@ namespace UEAgentEditorToolServerPrivate
 		return Object;
 	}
 
+	static FString WidgetVisibilityToString(const ESlateVisibility Visibility)
+	{
+		switch (Visibility)
+		{
+		case ESlateVisibility::Visible:
+			return TEXT("Visible");
+		case ESlateVisibility::Collapsed:
+			return TEXT("Collapsed");
+		case ESlateVisibility::Hidden:
+			return TEXT("Hidden");
+		case ESlateVisibility::HitTestInvisible:
+			return TEXT("HitTestInvisible");
+		case ESlateVisibility::SelfHitTestInvisible:
+			return TEXT("SelfHitTestInvisible");
+		default:
+			return TEXT("Unknown");
+		}
+	}
+
+	static TSharedPtr<FJsonObject> BuildAnchorsSnapshot(const FAnchors& Anchors)
+	{
+		TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+		Object->SetObjectField(TEXT("minimum"), BuildVector2DSnapshot(Anchors.Minimum));
+		Object->SetObjectField(TEXT("maximum"), BuildVector2DSnapshot(Anchors.Maximum));
+		return Object;
+	}
+
+	static TSharedPtr<FJsonObject> BuildWidgetTransformSnapshot(const FWidgetTransform& Transform)
+	{
+		TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+		Object->SetObjectField(TEXT("translation"), BuildVector2DSnapshot(Transform.Translation));
+		Object->SetObjectField(TEXT("scale"), BuildVector2DSnapshot(Transform.Scale));
+		Object->SetObjectField(TEXT("shear"), BuildVector2DSnapshot(Transform.Shear));
+		Object->SetNumberField(TEXT("angle"), Transform.Angle);
+		return Object;
+	}
+
+	static void AddWidgetSlotSnapshot(const UWidget* Widget, const TSharedPtr<FJsonObject>& WidgetObject)
+	{
+		if (Widget == nullptr || WidgetObject == nullptr || Widget->Slot == nullptr)
+		{
+			return;
+		}
+
+		TSharedPtr<FJsonObject> SlotObject = MakeShared<FJsonObject>();
+		SlotObject->SetStringField(TEXT("slot_class"), Widget->Slot->GetClass() != nullptr ? Widget->Slot->GetClass()->GetPathName() : FString());
+		if (const UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(Widget->Slot))
+		{
+			SlotObject->SetStringField(TEXT("slot_type"), TEXT("CanvasPanelSlot"));
+			SlotObject->SetObjectField(TEXT("position"), BuildVector2DSnapshot(CanvasSlot->GetPosition()));
+			SlotObject->SetObjectField(TEXT("size"), BuildVector2DSnapshot(CanvasSlot->GetSize()));
+			SlotObject->SetObjectField(TEXT("alignment"), BuildVector2DSnapshot(CanvasSlot->GetAlignment()));
+			SlotObject->SetObjectField(TEXT("anchors"), BuildAnchorsSnapshot(CanvasSlot->GetAnchors()));
+			SlotObject->SetBoolField(TEXT("auto_size"), CanvasSlot->GetAutoSize());
+			SlotObject->SetNumberField(TEXT("z_order"), CanvasSlot->GetZOrder());
+		}
+		WidgetObject->SetObjectField(TEXT("slot"), SlotObject);
+	}
+
+	static void AddWidgetTypeSpecificSnapshot(const UWidget* Widget, const TSharedPtr<FJsonObject>& WidgetObject)
+	{
+		if (Widget == nullptr || WidgetObject == nullptr)
+		{
+			return;
+		}
+
+		if (const UTextBlock* TextBlock = Cast<UTextBlock>(Widget))
+		{
+			TSharedPtr<FJsonObject> TextObject = MakeShared<FJsonObject>();
+			TextObject->SetStringField(TEXT("text"), TextBlock->GetText().ToString());
+			TextObject->SetNumberField(TEXT("font_size"), TextBlock->GetFont().Size);
+			WidgetObject->SetObjectField(TEXT("text_block"), TextObject);
+			return;
+		}
+
+		if (const UImage* Image = Cast<UImage>(Widget))
+		{
+			TSharedPtr<FJsonObject> ImageObject = MakeShared<FJsonObject>();
+			const FSlateBrush& Brush = Image->GetBrush();
+			ImageObject->SetObjectField(TEXT("image_size"), BuildVector2DSnapshot(Brush.ImageSize));
+			if (Brush.GetResourceObject() != nullptr)
+			{
+				ImageObject->SetStringField(TEXT("resource_path"), Brush.GetResourceObject()->GetPathName());
+				ImageObject->SetStringField(TEXT("resource_name"), Brush.GetResourceObject()->GetName());
+			}
+			WidgetObject->SetObjectField(TEXT("image"), ImageObject);
+		}
+	}
 
 	static TSharedPtr<FJsonObject> BuildActorComponentSnapshot(const UActorComponent* Component)
 	{
@@ -1326,10 +1426,20 @@ namespace UEAgentEditorToolServerPrivate
 			WidgetObject->SetStringField(TEXT("widget_name"), Widget->GetName());
 			WidgetObject->SetStringField(TEXT("widget_class"), Widget->GetClass() != nullptr ? Widget->GetClass()->GetPathName() : TEXT("unknown"));
 			WidgetObject->SetBoolField(TEXT("is_variable"), Widget->bIsVariable);
+			WidgetObject->SetStringField(TEXT("visibility"), WidgetVisibilityToString(Widget->GetVisibility()));
+			WidgetObject->SetObjectField(TEXT("render_transform"), BuildWidgetTransformSnapshot(Widget->GetRenderTransform()));
+			WidgetObject->SetObjectField(TEXT("render_transform_pivot"), BuildVector2DSnapshot(Widget->GetRenderTransformPivot()));
+			if (const UPanelWidget* ParentWidget = Widget->GetParent())
+			{
+				WidgetObject->SetStringField(TEXT("parent_widget"), ParentWidget->GetName());
+				WidgetObject->SetStringField(TEXT("parent_widget_class"), ParentWidget->GetClass() != nullptr ? ParentWidget->GetClass()->GetPathName() : FString());
+			}
 			if (Widget->Slot != nullptr)
 			{
 				WidgetObject->SetStringField(TEXT("slot_class"), Widget->Slot->GetClass()->GetPathName());
 			}
+			AddWidgetSlotSnapshot(Widget, WidgetObject);
+			AddWidgetTypeSpecificSnapshot(Widget, WidgetObject);
 			WidgetValues.Add(MakeShared<FJsonValueObject>(WidgetObject));
 		});
 		SnapshotObject->SetNumberField(TEXT("widget_count"), WidgetValues.Num());
