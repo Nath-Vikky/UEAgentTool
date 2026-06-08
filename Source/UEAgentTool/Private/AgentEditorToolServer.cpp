@@ -7,6 +7,7 @@
 #include "IContentBrowserSingleton.h"
 #include "ContentBrowserModule.h"
 #include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Editor.h"
 #include "Async/Async.h"
 #include "Blueprint/WidgetTree.h"
@@ -54,6 +55,13 @@ namespace UEAgentEditorToolServerPrivate
 {
 	static constexpr int32 MaxReadChunkBytes = 64 * 1024;
 	static constexpr int32 SocketWaitSeconds = 2;
+
+	static FString NormalizeAssetPackagePath(FString AssetPath);
+	static FString ToObjectPath(const FString& PackagePath);
+	static UStaticMesh* LoadStaticMeshAsset(const FString& StaticMeshPath);
+	static UStaticMesh* FindSelectedStaticMeshAsset(FString& OutResolvedPath);
+	static UStaticMesh* FindStaticMeshAssetByQuery(const FString& Query, FString& OutResolvedPath);
+	static TSharedPtr<FJsonObject> MakeToolErrorObject(const FString& Reason, const FString& Message);
 
 	static TArray<TSharedPtr<FJsonValue>> StringsToJsonArray(const TArray<FString>& Values)
 	{
@@ -123,6 +131,35 @@ namespace UEAgentEditorToolServerPrivate
 		StaticMeshObject->SetNumberField(TEXT("max_material_slots_returned"), MaxMaterialSlotsReturned);
 		StaticMeshObject->SetArrayField(TEXT("material_slots"), MaterialSlotValues);
 		AssetObject->SetObjectField(TEXT("static_mesh"), StaticMeshObject);
+	}
+
+	static TSharedPtr<FJsonObject> BuildStaticMeshDetailsSnapshot(const FString& StaticMeshPathOrQuery, const FString& ServerStatus)
+	{
+		FString ResolvedPath;
+		UStaticMesh* StaticMesh = nullptr;
+		const FString Query = StaticMeshPathOrQuery.TrimStartAndEnd();
+		if (!Query.IsEmpty())
+		{
+			StaticMesh = FindStaticMeshAssetByQuery(Query, ResolvedPath);
+		}
+		if (StaticMesh == nullptr)
+		{
+			StaticMesh = FindSelectedStaticMeshAsset(ResolvedPath);
+		}
+		if (StaticMesh == nullptr)
+		{
+			return MakeToolErrorObject(TEXT("static_mesh_not_found"), TEXT("No Static Mesh matched the provided path/query and no Static Mesh is selected."));
+		}
+
+		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
+		SnapshotObject->SetStringField(TEXT("static_mesh_schema_version"), TEXT("ue_agent_static_mesh_details_v1"));
+		SnapshotObject->SetStringField(TEXT("transport"), TEXT("tcp_jsonrpc_line"));
+		SnapshotObject->SetStringField(TEXT("server_status"), ServerStatus);
+		SnapshotObject->SetStringField(TEXT("static_mesh_name"), StaticMesh->GetName());
+		SnapshotObject->SetStringField(TEXT("static_mesh_path"), !ResolvedPath.IsEmpty() ? ResolvedPath : StaticMesh->GetPathName());
+		SnapshotObject->SetStringField(TEXT("resolved_from"), !Query.IsEmpty() ? TEXT("query_or_path") : TEXT("selected_content_browser_asset"));
+		AddStaticMeshSelectedAssetDetails(StaticMesh, SnapshotObject);
+		return SnapshotObject;
 	}
 
 	static TSharedPtr<FJsonObject> MakeInputSchema(const TArray<FString>& RequiredFields, const TArray<FString>& OptionalFields)
@@ -272,6 +309,82 @@ namespace UEAgentEditorToolServerPrivate
 		}
 		const FString PackagePath = NormalizeAssetPackagePath(MaterialInstancePath);
 		return Cast<UMaterialInstance>(StaticLoadObject(UMaterialInstance::StaticClass(), nullptr, *ToObjectPath(PackagePath)));
+	}
+
+	static UStaticMesh* LoadStaticMeshAsset(const FString& StaticMeshPath)
+	{
+		if (StaticMeshPath.TrimStartAndEnd().IsEmpty())
+		{
+			return nullptr;
+		}
+		const FString PackagePath = NormalizeAssetPackagePath(StaticMeshPath);
+		return Cast<UStaticMesh>(StaticLoadObject(UStaticMesh::StaticClass(), nullptr, *ToObjectPath(PackagePath)));
+	}
+
+	static UStaticMesh* FindSelectedStaticMeshAsset(FString& OutResolvedPath)
+	{
+		TArray<FAssetData> SelectedAssets;
+		if (!FModuleManager::Get().ModuleExists(TEXT("ContentBrowser")))
+		{
+			return nullptr;
+		}
+		FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+		ContentBrowserModule.Get().GetSelectedAssets(SelectedAssets);
+		for (const FAssetData& AssetData : SelectedAssets)
+		{
+			if (!AssetData.IsValid())
+			{
+				continue;
+			}
+			if (UStaticMesh* StaticMesh = Cast<UStaticMesh>(AssetData.GetAsset()))
+			{
+				OutResolvedPath = AssetData.GetSoftObjectPath().ToString();
+				return StaticMesh;
+			}
+		}
+		return nullptr;
+	}
+
+	static UStaticMesh* FindStaticMeshAssetByQuery(const FString& Query, FString& OutResolvedPath)
+	{
+		const FString Needle = Query.TrimStartAndEnd();
+		if (Needle.IsEmpty())
+		{
+			return nullptr;
+		}
+		if (Needle.StartsWith(TEXT("/")))
+		{
+			if (UStaticMesh* StaticMesh = LoadStaticMeshAsset(Needle))
+			{
+				OutResolvedPath = ToObjectPath(NormalizeAssetPackagePath(Needle));
+				return StaticMesh;
+			}
+		}
+
+		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		FARFilter Filter;
+		Filter.ClassPaths.Add(UStaticMesh::StaticClass()->GetClassPathName());
+		Filter.PackagePaths.Add(FName(TEXT("/Game")));
+		Filter.bRecursivePaths = true;
+
+		TArray<FAssetData> AssetDataList;
+		AssetRegistryModule.Get().GetAssets(Filter, AssetDataList);
+		for (const FAssetData& AssetData : AssetDataList)
+		{
+			const FString AssetName = AssetData.AssetName.ToString();
+			const FString ObjectPath = AssetData.GetSoftObjectPath().ToString();
+			if (AssetName.Equals(Needle, ESearchCase::IgnoreCase)
+				|| AssetName.Contains(Needle, ESearchCase::IgnoreCase)
+				|| ObjectPath.Contains(Needle, ESearchCase::IgnoreCase))
+			{
+				if (UStaticMesh* StaticMesh = Cast<UStaticMesh>(AssetData.GetAsset()))
+				{
+					OutResolvedPath = ObjectPath;
+					return StaticMesh;
+				}
+			}
+		}
+		return nullptr;
 	}
 
 	static TSharedPtr<FJsonObject> MakeMaterialColorObject(const FLinearColor& Color)
@@ -1547,6 +1660,25 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 	{
 		return BuildSelectedAssetsResult();
 	}
+	if (ToolName.Equals(TEXT("get_static_mesh_details"), ESearchCase::IgnoreCase))
+	{
+		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
+		const TSharedPtr<FJsonObject> ArgumentsObject = ParamsObject.IsValid() && ParamsObject->TryGetObjectField(TEXT("arguments"), ArgumentsField) && ArgumentsField != nullptr ? *ArgumentsField : nullptr;
+		FString StaticMeshPathOrQuery;
+		if (ArgumentsObject.IsValid())
+		{
+			ArgumentsObject->TryGetStringField(TEXT("static_mesh_path"), StaticMeshPathOrQuery);
+			if (StaticMeshPathOrQuery.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("asset_path"), StaticMeshPathOrQuery);
+			}
+			if (StaticMeshPathOrQuery.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("query"), StaticMeshPathOrQuery);
+			}
+		}
+		return BuildStaticMeshDetailsResult(StaticMeshPathOrQuery);
+	}
 	if (ToolName.Equals(TEXT("get_selected_actors"), ESearchCase::IgnoreCase))
 	{
 		return BuildSelectedActorsResult();
@@ -1690,6 +1822,47 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildSelectedAssetsResult() co
 	}
 	return ResultObject;
 }
+
+TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildStaticMeshDetailsResult(const FString& StaticMeshPathOrQuery) const
+{
+	TSharedPtr<FJsonObject> SnapshotObject;
+	const FString ServerStatus = GetStatusText();
+	if (IsInGameThread())
+	{
+		SnapshotObject = UEAgentEditorToolServerPrivate::BuildStaticMeshDetailsSnapshot(StaticMeshPathOrQuery, ServerStatus);
+	}
+	else
+	{
+		FEvent* CompletionEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [StaticMeshPathOrQuery, ServerStatus, &SnapshotObject, CompletionEvent]()
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::BuildStaticMeshDetailsSnapshot(StaticMeshPathOrQuery, ServerStatus);
+			CompletionEvent->Trigger();
+		});
+		const bool bCompleted = CompletionEvent->Wait(FTimespan::FromSeconds(3));
+		FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		if (!bCompleted)
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading Static Mesh details on the game thread."));
+		}
+	}
+
+	TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ContentValues;
+	TSharedPtr<FJsonObject> TextContent = MakeShared<FJsonObject>();
+	TextContent->SetStringField(TEXT("type"), TEXT("text"));
+	TextContent->SetStringField(TEXT("text"), SerializeJsonObject(SnapshotObject));
+	ContentValues.Add(MakeShared<FJsonValueObject>(TextContent));
+	ResultObject->SetArrayField(TEXT("content"), ContentValues);
+	const TSharedPtr<FJsonObject> StructuredObject = SnapshotObject.IsValid() ? SnapshotObject : MakeShared<FJsonObject>();
+	ResultObject->SetObjectField(TEXT("structuredContent"), StructuredObject);
+	if (SnapshotObject.IsValid() && SnapshotObject->HasField(TEXT("reason")))
+	{
+		ResultObject->SetBoolField(TEXT("isError"), true);
+	}
+	return ResultObject;
+}
+
 TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildSelectedActorsResult() const
 {
 	TSharedPtr<FJsonObject> SnapshotObject;

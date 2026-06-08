@@ -34,6 +34,7 @@ private:
 	TSharedPtr<FJsonObject> BuildSelectedAssetsResult() const;
 	TSharedPtr<FJsonObject> BuildSelectedActorsResult() const;
 	TSharedPtr<FJsonObject> BuildLevelActorsResult(const TSharedPtr<FJsonObject>& ArgumentsObject) const;
+	TSharedPtr<FJsonObject> BuildStaticMeshDetailsResult(const FString& StaticMeshPathOrQuery) const;
 	TSharedPtr<FJsonObject> BuildBlueprintGraphResult(const FString& BlueprintPath) const;
 	TSharedPtr<FJsonObject> BuildWidgetTreeResult(const FString& WidgetBlueprintPath) const;
 	TSharedPtr<FJsonObject> BuildMaterialInstanceParametersResult(const FString& MaterialInstancePath) const;
