@@ -19,6 +19,8 @@
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "Components/ActorComponent.h"
+#include "Components/SceneComponent.h"
 #include "Components/PanelSlot.h"
 #include "Components/Widget.h"
 #include "Common/TcpListener.h"
@@ -417,6 +419,33 @@ namespace UEAgentEditorToolServerPrivate
 		return Object;
 	}
 
+
+	static TSharedPtr<FJsonObject> BuildActorComponentSnapshot(const UActorComponent* Component)
+	{
+		TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+		if (Component == nullptr)
+		{
+			return Object;
+		}
+
+		Object->SetStringField(TEXT("component_name"), Component->GetName());
+		Object->SetStringField(TEXT("component_class"), Component->GetClass() != nullptr ? Component->GetClass()->GetPathName() : FString());
+		Object->SetBoolField(TEXT("is_registered"), Component->IsRegistered());
+
+		const USceneComponent* SceneComponent = Cast<USceneComponent>(Component);
+		Object->SetBoolField(TEXT("is_scene_component"), SceneComponent != nullptr);
+		if (SceneComponent != nullptr)
+		{
+			Object->SetObjectField(TEXT("relative_location"), BuildVectorSnapshot(SceneComponent->GetRelativeLocation()));
+			Object->SetObjectField(TEXT("relative_rotation"), BuildRotatorSnapshot(SceneComponent->GetRelativeRotation()));
+			Object->SetObjectField(TEXT("relative_scale"), BuildVectorSnapshot(SceneComponent->GetRelativeScale3D()));
+			if (SceneComponent->GetAttachParent() != nullptr)
+			{
+				Object->SetStringField(TEXT("attach_parent"), SceneComponent->GetAttachParent()->GetName());
+			}
+		}
+		return Object;
+	}
 	static TSharedPtr<FJsonObject> BuildEditorContextSnapshot(const FString& ServerStatus)
 	{
 		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
@@ -561,6 +590,23 @@ namespace UEAgentEditorToolServerPrivate
 				ActorObject->SetStringField(TEXT("actor_path"), Actor->GetPathName());
 				ActorObject->SetStringField(TEXT("actor_class"), Actor->GetClass() != nullptr ? Actor->GetClass()->GetPathName() : FString());
 				ActorObject->SetObjectField(TEXT("transform"), BuildTransformSnapshot(Actor->GetActorTransform()));
+				TArray<UActorComponent*> Components;
+				Actor->GetComponents(Components);
+				TArray<TSharedPtr<FJsonValue>> ComponentValues;
+				for (UActorComponent* Component : Components)
+				{
+					if (Component == nullptr)
+					{
+						continue;
+					}
+					ComponentValues.Add(MakeShared<FJsonValueObject>(BuildActorComponentSnapshot(Component)));
+					if (ComponentValues.Num() >= 32)
+					{
+						break;
+					}
+				}
+				ActorObject->SetNumberField(TEXT("component_count"), Components.Num());
+				ActorObject->SetArrayField(TEXT("components"), ComponentValues);
 				ActorValues.Add(MakeShared<FJsonValueObject>(ActorObject));
 				if (ActorValues.Num() >= MaxActorsReturned)
 				{
