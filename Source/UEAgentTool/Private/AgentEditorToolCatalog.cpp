@@ -129,6 +129,14 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{},
 		TEXT("read_only")));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("get_selected_assets")),
+		TEXT("get_selected_assets"),
+		TEXT("Read currently selected Content Browser assets through the optional TCP tool server."),
+		TEXT("asset"),
+		{},
+		{},
+		TEXT("read_only")));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("get_selected_actors")),
 		TEXT("get_selected_actors"),
 		TEXT("Read currently selected Level Actors through the optional TCP tool server."),

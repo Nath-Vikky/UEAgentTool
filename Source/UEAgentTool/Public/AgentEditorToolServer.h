@@ -31,6 +31,7 @@ private:
 	TSharedPtr<FJsonObject> BuildToolsListResult() const;
 	TSharedPtr<FJsonObject> BuildToolCallResult(const TSharedPtr<FJsonObject>& ParamsObject) const;
 	TSharedPtr<FJsonObject> BuildEditorContextResult() const;
+	TSharedPtr<FJsonObject> BuildSelectedAssetsResult() const;
 	TSharedPtr<FJsonObject> BuildSelectedActorsResult() const;
 	TSharedPtr<FJsonObject> BuildBlueprintGraphResult(const FString& BlueprintPath) const;
 	TSharedPtr<FJsonObject> BuildWidgetTreeResult(const FString& WidgetBlueprintPath) const;

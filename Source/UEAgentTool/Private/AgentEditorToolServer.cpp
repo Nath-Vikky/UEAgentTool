@@ -3,6 +3,10 @@
 #include "AgentEditorToolServer.h"
 
 #include "AgentEditorToolCatalog.h"
+#include "Modules/ModuleManager.h"
+#include "IContentBrowserSingleton.h"
+#include "ContentBrowserModule.h"
+#include "AssetRegistry/AssetData.h"
 #include "Editor.h"
 #include "Async/Async.h"
 #include "Blueprint/WidgetTree.h"
@@ -479,6 +483,50 @@ namespace UEAgentEditorToolServerPrivate
 	}
 
 
+
+	static TSharedPtr<FJsonObject> BuildSelectedAssetsSnapshot(const FString& ServerStatus)
+	{
+		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
+		SnapshotObject->SetStringField(TEXT("asset_selection_schema_version"), TEXT("ue_agent_selected_assets_v1"));
+		SnapshotObject->SetStringField(TEXT("transport"), TEXT("tcp_jsonrpc_line"));
+		SnapshotObject->SetStringField(TEXT("server_status"), ServerStatus);
+
+		constexpr int32 MaxAssetsReturned = 64;
+		TArray<FAssetData> SelectedAssets;
+		const bool bContentBrowserAvailable = FModuleManager::Get().ModuleExists(TEXT("ContentBrowser"));
+		SnapshotObject->SetBoolField(TEXT("content_browser_available"), bContentBrowserAvailable);
+		if (bContentBrowserAvailable)
+		{
+			FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+			ContentBrowserModule.Get().GetSelectedAssets(SelectedAssets);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> AssetValues;
+		for (const FAssetData& AssetData : SelectedAssets)
+		{
+			if (!AssetData.IsValid())
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> AssetObject = MakeShared<FJsonObject>();
+			AssetObject->SetStringField(TEXT("asset_name"), AssetData.AssetName.ToString());
+			AssetObject->SetStringField(TEXT("asset_path"), AssetData.GetSoftObjectPath().ToString());
+			AssetObject->SetStringField(TEXT("asset_type"), AssetData.AssetClassPath.GetAssetName().ToString());
+			AssetObject->SetStringField(TEXT("package_name"), AssetData.PackageName.ToString());
+			AssetObject->SetStringField(TEXT("package_path"), AssetData.PackagePath.ToString());
+			AssetValues.Add(MakeShared<FJsonValueObject>(AssetObject));
+			if (AssetValues.Num() >= MaxAssetsReturned)
+			{
+				break;
+			}
+		}
+
+		SnapshotObject->SetNumberField(TEXT("selected_asset_count"), SelectedAssets.Num());
+		SnapshotObject->SetNumberField(TEXT("max_assets_returned"), MaxAssetsReturned);
+		SnapshotObject->SetArrayField(TEXT("assets"), AssetValues);
+		return SnapshotObject;
+	}
 	static TSharedPtr<FJsonObject> BuildSelectedActorsSnapshot(const FString& ServerStatus)
 	{
 		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
@@ -948,6 +996,10 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 	{
 		return BuildEditorContextResult();
 	}
+	if (ToolName.Equals(TEXT("get_selected_assets"), ESearchCase::IgnoreCase))
+	{
+		return BuildSelectedAssetsResult();
+	}
 	if (ToolName.Equals(TEXT("get_selected_actors"), ESearchCase::IgnoreCase))
 	{
 		return BuildSelectedActorsResult();
@@ -1026,6 +1078,46 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildEditorContextResult() con
 	return ResultObject;
 }
 
+
+TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildSelectedAssetsResult() const
+{
+	TSharedPtr<FJsonObject> SnapshotObject;
+	const FString ServerStatus = GetStatusText();
+	if (IsInGameThread())
+	{
+		SnapshotObject = UEAgentEditorToolServerPrivate::BuildSelectedAssetsSnapshot(ServerStatus);
+	}
+	else
+	{
+		FEvent* CompletionEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [ServerStatus, &SnapshotObject, CompletionEvent]()
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::BuildSelectedAssetsSnapshot(ServerStatus);
+			CompletionEvent->Trigger();
+		});
+		const bool bCompleted = CompletionEvent->Wait(FTimespan::FromSeconds(3));
+		FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		if (!bCompleted)
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading selected assets on the game thread."));
+		}
+	}
+
+	TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ContentValues;
+	TSharedPtr<FJsonObject> TextContent = MakeShared<FJsonObject>();
+	TextContent->SetStringField(TEXT("type"), TEXT("text"));
+	TextContent->SetStringField(TEXT("text"), SerializeJsonObject(SnapshotObject));
+	ContentValues.Add(MakeShared<FJsonValueObject>(TextContent));
+	ResultObject->SetArrayField(TEXT("content"), ContentValues);
+	const TSharedPtr<FJsonObject> StructuredObject = SnapshotObject.IsValid() ? SnapshotObject : MakeShared<FJsonObject>();
+	ResultObject->SetObjectField(TEXT("structuredContent"), StructuredObject);
+	if (SnapshotObject.IsValid() && SnapshotObject->HasField(TEXT("reason")))
+	{
+		ResultObject->SetBoolField(TEXT("isError"), true);
+	}
+	return ResultObject;
+}
 TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildSelectedActorsResult() const
 {
 	TSharedPtr<FJsonObject> SnapshotObject;
