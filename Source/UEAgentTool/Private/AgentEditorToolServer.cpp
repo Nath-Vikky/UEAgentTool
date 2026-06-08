@@ -1927,6 +1927,96 @@ namespace UEAgentEditorToolServerPrivate
 		SnapshotObject->SetArrayField(TEXT("static_switch_parameters"), StaticSwitchValues);
 		return SnapshotObject;
 	}
+
+	static TSharedPtr<FJsonObject> FindMaterialParameterByQuery(
+		const TArray<TSharedPtr<FJsonValue>>& ParameterValues,
+		const FString& ParameterNameOrQuery,
+		const FString& ParameterType)
+	{
+		const FString Needle = ParameterNameOrQuery.TrimStartAndEnd();
+		const FString TypeNeedle = ParameterType.TrimStartAndEnd();
+		if (Needle.IsEmpty())
+		{
+			return nullptr;
+		}
+
+		for (const TSharedPtr<FJsonValue>& ParameterValue : ParameterValues)
+		{
+			const TSharedPtr<FJsonObject> ParameterObject = ParameterValue.IsValid() ? ParameterValue->AsObject() : nullptr;
+			if (!ParameterObject.IsValid())
+			{
+				continue;
+			}
+			const FString Name = ParameterObject->GetStringField(TEXT("parameter_name"));
+			const FString Type = ParameterObject->GetStringField(TEXT("parameter_type"));
+			if (!TypeNeedle.IsEmpty() && !Type.Equals(TypeNeedle, ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+			if (Name.Equals(Needle, ESearchCase::IgnoreCase) || Name.Contains(Needle, ESearchCase::IgnoreCase))
+			{
+				return ParameterObject;
+			}
+		}
+		return nullptr;
+	}
+
+	static TSharedPtr<FJsonObject> BuildMaterialParameterDetailsSnapshot(
+		const FString& MaterialInstancePath,
+		const FString& ParameterNameOrQuery,
+		const FString& ParameterType,
+		const FString& ServerStatus)
+	{
+		FString ResolvedFrom;
+		FString ResolvedPath;
+		int32 SelectedAssetCount = 0;
+		UMaterialInstance* MaterialInstance = ResolveMaterialInstanceAsset(
+			MaterialInstancePath,
+			ResolvedFrom,
+			ResolvedPath,
+			SelectedAssetCount);
+		if (MaterialInstance == nullptr)
+		{
+			const FString ErrorMessage = MaterialInstancePath.TrimStartAndEnd().IsEmpty()
+				? FString(TEXT("No Material Instance path was provided and no selected Content Browser Material Instance was found."))
+				: FString::Printf(TEXT("Material Instance not found: %s"), *MaterialInstancePath);
+			return MakeToolErrorObject(TEXT("material_instance_not_found"), ErrorMessage);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> AllParameterValues;
+		TArray<TSharedPtr<FJsonValue>> ScalarValues;
+		TArray<TSharedPtr<FJsonValue>> VectorValues;
+		TArray<TSharedPtr<FJsonValue>> TextureValues;
+		TArray<TSharedPtr<FJsonValue>> StaticSwitchValues;
+		AddScalarMaterialParameters(MaterialInstance, ScalarValues, AllParameterValues);
+		AddVectorMaterialParameters(MaterialInstance, VectorValues, AllParameterValues);
+		AddTextureMaterialParameters(MaterialInstance, TextureValues, AllParameterValues);
+		AddStaticSwitchMaterialParameters(MaterialInstance, StaticSwitchValues, AllParameterValues);
+
+		const TSharedPtr<FJsonObject> ParameterObject = FindMaterialParameterByQuery(AllParameterValues, ParameterNameOrQuery, ParameterType);
+		if (!ParameterObject.IsValid())
+		{
+			return MakeToolErrorObject(
+				TEXT("material_parameter_not_found"),
+				FString::Printf(TEXT("Material parameter not found: %s"), *ParameterNameOrQuery));
+		}
+
+		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
+		SnapshotObject->SetStringField(TEXT("material_parameter_schema_version"), TEXT("ue_agent_material_parameter_details_v1"));
+		SnapshotObject->SetStringField(TEXT("transport"), TEXT("tcp_jsonrpc_line"));
+		SnapshotObject->SetStringField(TEXT("server_status"), ServerStatus);
+		SnapshotObject->SetStringField(TEXT("requested_material_instance_path"), MaterialInstancePath);
+		SnapshotObject->SetStringField(TEXT("requested_parameter"), ParameterNameOrQuery);
+		SnapshotObject->SetStringField(TEXT("requested_parameter_type"), ParameterType);
+		SnapshotObject->SetStringField(TEXT("resolved_from"), ResolvedFrom);
+		SnapshotObject->SetStringField(TEXT("material_instance_path"), !ResolvedPath.IsEmpty() ? ResolvedPath : MaterialInstance->GetPathName());
+		SnapshotObject->SetStringField(TEXT("material_instance_name"), MaterialInstance->GetName());
+		SnapshotObject->SetStringField(TEXT("parent_material"), MaterialInstance->Parent != nullptr ? MaterialInstance->Parent->GetPathName() : FString());
+		SnapshotObject->SetNumberField(TEXT("selected_asset_count"), SelectedAssetCount);
+		SnapshotObject->SetNumberField(TEXT("parameter_count"), AllParameterValues.Num());
+		SnapshotObject->SetObjectField(TEXT("parameter"), ParameterObject);
+		return SnapshotObject;
+	}
 }
 
 FUEAgentEditorToolServer::FUEAgentEditorToolServer() = default;
@@ -2385,6 +2475,33 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 			}
 		}
 		return BuildMaterialInstanceParametersResult(MaterialInstancePath);
+	}
+	if (ToolName.Equals(TEXT("get_material_parameter_details"), ESearchCase::IgnoreCase))
+	{
+		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
+		const TSharedPtr<FJsonObject> ArgumentsObject = ParamsObject.IsValid() && ParamsObject->TryGetObjectField(TEXT("arguments"), ArgumentsField) && ArgumentsField != nullptr ? *ArgumentsField : nullptr;
+		FString MaterialInstancePath;
+		FString ParameterNameOrQuery;
+		FString ParameterType;
+		if (ArgumentsObject.IsValid())
+		{
+			ArgumentsObject->TryGetStringField(TEXT("material_instance_path"), MaterialInstancePath);
+			if (MaterialInstancePath.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("asset_path"), MaterialInstancePath);
+			}
+			ArgumentsObject->TryGetStringField(TEXT("parameter_name"), ParameterNameOrQuery);
+			if (ParameterNameOrQuery.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("target_parameter"), ParameterNameOrQuery);
+			}
+			if (ParameterNameOrQuery.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("query"), ParameterNameOrQuery);
+			}
+			ArgumentsObject->TryGetStringField(TEXT("parameter_type"), ParameterType);
+		}
+		return BuildMaterialParameterDetailsResult(MaterialInstancePath, ParameterNameOrQuery, ParameterType);
 	}
 
 	ResultObject->SetBoolField(TEXT("isError"), true);
@@ -2852,6 +2969,46 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildMaterialInstanceParameter
 		if (!bCompleted)
 		{
 			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading Material Instance parameters on the game thread."));
+		}
+	}
+
+	TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ContentValues;
+	TSharedPtr<FJsonObject> TextContent = MakeShared<FJsonObject>();
+	TextContent->SetStringField(TEXT("type"), TEXT("text"));
+	TextContent->SetStringField(TEXT("text"), SerializeJsonObject(SnapshotObject));
+	ContentValues.Add(MakeShared<FJsonValueObject>(TextContent));
+	ResultObject->SetArrayField(TEXT("content"), ContentValues);
+	const TSharedPtr<FJsonObject> StructuredObject = SnapshotObject.IsValid() ? SnapshotObject : MakeShared<FJsonObject>();
+	ResultObject->SetObjectField(TEXT("structuredContent"), StructuredObject);
+	if (SnapshotObject.IsValid() && SnapshotObject->HasField(TEXT("reason")))
+	{
+		ResultObject->SetBoolField(TEXT("isError"), true);
+	}
+	return ResultObject;
+}
+
+TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildMaterialParameterDetailsResult(const FString& MaterialInstancePath, const FString& ParameterNameOrQuery, const FString& ParameterType) const
+{
+	TSharedPtr<FJsonObject> SnapshotObject;
+	const FString ServerStatus = GetStatusText();
+	if (IsInGameThread())
+	{
+		SnapshotObject = UEAgentEditorToolServerPrivate::BuildMaterialParameterDetailsSnapshot(MaterialInstancePath, ParameterNameOrQuery, ParameterType, ServerStatus);
+	}
+	else
+	{
+		FEvent* CompletionEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [MaterialInstancePath, ParameterNameOrQuery, ParameterType, ServerStatus, &SnapshotObject, CompletionEvent]()
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::BuildMaterialParameterDetailsSnapshot(MaterialInstancePath, ParameterNameOrQuery, ParameterType, ServerStatus);
+			CompletionEvent->Trigger();
+		});
+		const bool bCompleted = CompletionEvent->Wait(FTimespan::FromSeconds(3));
+		FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		if (!bCompleted)
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading Material parameter detail on the game thread."));
 		}
 	}
 

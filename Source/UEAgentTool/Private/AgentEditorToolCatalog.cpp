@@ -217,6 +217,14 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("material_instance_path") },
 		TEXT("read_only")));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("get_material_parameter_details")),
+		TEXT("get_material_parameter_details"),
+		TEXT("Read one Material Instance parameter's live type and value through the optional TCP tool server."),
+		TEXT("material"),
+		{ TEXT("parameter_name") },
+		{ TEXT("material_instance_path"), TEXT("parameter_type"), TEXT("query"), TEXT("target_parameter") },
+		TEXT("read_only")));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("add_umg_widget")),
 		TEXT("add_umg_widget"),
 		TEXT("Add one simple Widget to a Widget Blueprint after backend Proposal confirmation."),

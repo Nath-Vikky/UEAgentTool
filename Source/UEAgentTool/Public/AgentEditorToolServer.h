@@ -42,6 +42,7 @@ private:
 	TSharedPtr<FJsonObject> BuildWidgetTreeResult(const FString& WidgetBlueprintPath) const;
 	TSharedPtr<FJsonObject> BuildWidgetDetailsResult(const FString& WidgetBlueprintPath, const FString& WidgetName) const;
 	TSharedPtr<FJsonObject> BuildMaterialInstanceParametersResult(const FString& MaterialInstancePath) const;
+	TSharedPtr<FJsonObject> BuildMaterialParameterDetailsResult(const FString& MaterialInstancePath, const FString& ParameterNameOrQuery, const FString& ParameterType) const;
 
 	static TSharedPtr<FJsonObject> ParseJsonObject(const FString& Text);
 	static FString SerializeJsonObject(const TSharedPtr<FJsonObject>& JsonObject);
