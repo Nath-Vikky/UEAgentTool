@@ -385,6 +385,34 @@ namespace UEAgentEditorToolServerPrivate
 		}
 	}
 
+
+	static TSharedPtr<FJsonObject> BuildVectorSnapshot(const FVector& Value)
+	{
+		TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+		Object->SetNumberField(TEXT("x"), Value.X);
+		Object->SetNumberField(TEXT("y"), Value.Y);
+		Object->SetNumberField(TEXT("z"), Value.Z);
+		return Object;
+	}
+
+	static TSharedPtr<FJsonObject> BuildRotatorSnapshot(const FRotator& Value)
+	{
+		TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+		Object->SetNumberField(TEXT("pitch"), Value.Pitch);
+		Object->SetNumberField(TEXT("yaw"), Value.Yaw);
+		Object->SetNumberField(TEXT("roll"), Value.Roll);
+		return Object;
+	}
+
+	static TSharedPtr<FJsonObject> BuildTransformSnapshot(const FTransform& Value)
+	{
+		TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+		Object->SetObjectField(TEXT("location"), BuildVectorSnapshot(Value.GetLocation()));
+		Object->SetObjectField(TEXT("rotation"), BuildRotatorSnapshot(Value.Rotator()));
+		Object->SetObjectField(TEXT("scale"), BuildVectorSnapshot(Value.GetScale3D()));
+		return Object;
+	}
+
 	static TSharedPtr<FJsonObject> BuildEditorContextSnapshot(const FString& ServerStatus)
 	{
 		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
@@ -447,6 +475,55 @@ namespace UEAgentEditorToolServerPrivate
 			EditorWorldObject->SetStringField(TEXT("map_name"), TEXT(""));
 		}
 		SnapshotObject->SetObjectField(TEXT("editor_world"), EditorWorldObject);
+		return SnapshotObject;
+	}
+
+
+	static TSharedPtr<FJsonObject> BuildSelectedActorsSnapshot(const FString& ServerStatus)
+	{
+		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
+		SnapshotObject->SetStringField(TEXT("selection_schema_version"), TEXT("ue_agent_selected_actors_v1"));
+		SnapshotObject->SetStringField(TEXT("transport"), TEXT("tcp_jsonrpc_line"));
+		SnapshotObject->SetStringField(TEXT("server_status"), ServerStatus);
+		SnapshotObject->SetBoolField(TEXT("editor_available"), GEditor != nullptr);
+
+		UWorld* EditorWorld = GEditor != nullptr ? GEditor->GetEditorWorldContext().World() : nullptr;
+		if (EditorWorld != nullptr)
+		{
+			SnapshotObject->SetStringField(TEXT("world_name"), EditorWorld->GetName());
+			SnapshotObject->SetStringField(TEXT("map_name"), EditorWorld->GetMapName());
+		}
+
+		constexpr int32 MaxActorsReturned = 64;
+		TArray<TSharedPtr<FJsonValue>> ActorValues;
+		USelection* Selection = GEditor != nullptr ? GEditor->GetSelectedActors() : nullptr;
+		if (Selection != nullptr)
+		{
+			for (FSelectionIterator It(*Selection); It; ++It)
+			{
+				AActor* Actor = Cast<AActor>(*It);
+				if (Actor == nullptr)
+				{
+					continue;
+				}
+
+				TSharedPtr<FJsonObject> ActorObject = MakeShared<FJsonObject>();
+				ActorObject->SetStringField(TEXT("actor_label"), Actor->GetActorLabel());
+				ActorObject->SetStringField(TEXT("actor_name"), Actor->GetName());
+				ActorObject->SetStringField(TEXT("actor_path"), Actor->GetPathName());
+				ActorObject->SetStringField(TEXT("actor_class"), Actor->GetClass() != nullptr ? Actor->GetClass()->GetPathName() : FString());
+				ActorObject->SetObjectField(TEXT("transform"), BuildTransformSnapshot(Actor->GetActorTransform()));
+				ActorValues.Add(MakeShared<FJsonValueObject>(ActorObject));
+				if (ActorValues.Num() >= MaxActorsReturned)
+				{
+					break;
+				}
+			}
+		}
+
+		SnapshotObject->SetNumberField(TEXT("selected_actor_count"), Selection != nullptr ? Selection->Num() : 0);
+		SnapshotObject->SetNumberField(TEXT("max_actors_returned"), MaxActorsReturned);
+		SnapshotObject->SetArrayField(TEXT("actors"), ActorValues);
 		return SnapshotObject;
 	}
 
@@ -871,6 +948,10 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 	{
 		return BuildEditorContextResult();
 	}
+	if (ToolName.Equals(TEXT("get_selected_actors"), ESearchCase::IgnoreCase))
+	{
+		return BuildSelectedActorsResult();
+	}
 	if (ToolName.Equals(TEXT("get_blueprint_graph"), ESearchCase::IgnoreCase))
 	{
 		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
@@ -944,6 +1025,47 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildEditorContextResult() con
 	}
 	return ResultObject;
 }
+
+TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildSelectedActorsResult() const
+{
+	TSharedPtr<FJsonObject> SnapshotObject;
+	const FString ServerStatus = GetStatusText();
+	if (IsInGameThread())
+	{
+		SnapshotObject = UEAgentEditorToolServerPrivate::BuildSelectedActorsSnapshot(ServerStatus);
+	}
+	else
+	{
+		FEvent* CompletionEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [ServerStatus, &SnapshotObject, CompletionEvent]()
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::BuildSelectedActorsSnapshot(ServerStatus);
+			CompletionEvent->Trigger();
+		});
+		const bool bCompleted = CompletionEvent->Wait(FTimespan::FromSeconds(3));
+		FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		if (!bCompleted)
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading selected actors on the game thread."));
+		}
+	}
+
+	TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ContentValues;
+	TSharedPtr<FJsonObject> TextContent = MakeShared<FJsonObject>();
+	TextContent->SetStringField(TEXT("type"), TEXT("text"));
+	TextContent->SetStringField(TEXT("text"), SerializeJsonObject(SnapshotObject));
+	ContentValues.Add(MakeShared<FJsonValueObject>(TextContent));
+	ResultObject->SetArrayField(TEXT("content"), ContentValues);
+	const TSharedPtr<FJsonObject> StructuredObject = SnapshotObject.IsValid() ? SnapshotObject : MakeShared<FJsonObject>();
+	ResultObject->SetObjectField(TEXT("structuredContent"), StructuredObject);
+	if (SnapshotObject.IsValid() && SnapshotObject->HasField(TEXT("reason")))
+	{
+		ResultObject->SetBoolField(TEXT("isError"), true);
+	}
+	return ResultObject;
+}
+
 TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildBlueprintGraphResult(const FString& BlueprintPath) const
 {
 	TSharedPtr<FJsonObject> SnapshotObject;

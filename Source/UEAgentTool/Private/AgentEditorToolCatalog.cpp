@@ -129,6 +129,14 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{},
 		TEXT("read_only")));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("get_selected_actors")),
+		TEXT("get_selected_actors"),
+		TEXT("Read currently selected Level Actors through the optional TCP tool server."),
+		TEXT("level"),
+		{},
+		{},
+		TEXT("read_only")));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("get_blueprint_graph")),
 		TEXT("get_blueprint_graph"),
 		TEXT("Read Blueprint graph metadata through the optional TCP tool server."),
