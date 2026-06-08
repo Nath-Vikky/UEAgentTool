@@ -177,6 +177,14 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{},
 		TEXT("read_only")));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("get_widget_details")),
+		TEXT("get_widget_details"),
+		TEXT("Read one UMG Widget's live properties, parent, children, and slot metadata through the optional TCP tool server."),
+		TEXT("umg"),
+		{ TEXT("widget_blueprint_path"), TEXT("widget_name") },
+		{ TEXT("blueprint_path"), TEXT("target_widget"), TEXT("query") },
+		TEXT("read_only")));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("get_material_instance_parameters")),
 		TEXT("get_material_instance_parameters"),
 		TEXT("Read Material Instance parameters through the optional TCP tool server."),

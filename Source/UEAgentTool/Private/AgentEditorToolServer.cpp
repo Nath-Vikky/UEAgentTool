@@ -875,6 +875,34 @@ namespace UEAgentEditorToolServerPrivate
 		}
 	}
 
+	static TSharedPtr<FJsonObject> BuildWidgetSnapshot(const UWidget* Widget)
+	{
+		TSharedPtr<FJsonObject> WidgetObject = MakeShared<FJsonObject>();
+		if (Widget == nullptr)
+		{
+			return WidgetObject;
+		}
+
+		WidgetObject->SetStringField(TEXT("widget_name"), Widget->GetName());
+		WidgetObject->SetStringField(TEXT("widget_class"), Widget->GetClass() != nullptr ? Widget->GetClass()->GetPathName() : TEXT("unknown"));
+		WidgetObject->SetBoolField(TEXT("is_variable"), Widget->bIsVariable);
+		WidgetObject->SetStringField(TEXT("visibility"), WidgetVisibilityToString(Widget->GetVisibility()));
+		WidgetObject->SetObjectField(TEXT("render_transform"), BuildWidgetTransformSnapshot(Widget->GetRenderTransform()));
+		WidgetObject->SetObjectField(TEXT("render_transform_pivot"), BuildVector2DSnapshot(Widget->GetRenderTransformPivot()));
+		if (const UPanelWidget* ParentWidget = Widget->GetParent())
+		{
+			WidgetObject->SetStringField(TEXT("parent_widget"), ParentWidget->GetName());
+			WidgetObject->SetStringField(TEXT("parent_widget_class"), ParentWidget->GetClass() != nullptr ? ParentWidget->GetClass()->GetPathName() : FString());
+		}
+		if (Widget->Slot != nullptr)
+		{
+			WidgetObject->SetStringField(TEXT("slot_class"), Widget->Slot->GetClass()->GetPathName());
+		}
+		AddWidgetSlotSnapshot(Widget, WidgetObject);
+		AddWidgetTypeSpecificSnapshot(Widget, WidgetObject);
+		return WidgetObject;
+	}
+
 	static TSharedPtr<FJsonObject> BuildActorComponentSnapshot(const UActorComponent* Component)
 	{
 		TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
@@ -1422,28 +1450,78 @@ namespace UEAgentEditorToolServerPrivate
 			{
 				return;
 			}
-			TSharedPtr<FJsonObject> WidgetObject = MakeShared<FJsonObject>();
-			WidgetObject->SetStringField(TEXT("widget_name"), Widget->GetName());
-			WidgetObject->SetStringField(TEXT("widget_class"), Widget->GetClass() != nullptr ? Widget->GetClass()->GetPathName() : TEXT("unknown"));
-			WidgetObject->SetBoolField(TEXT("is_variable"), Widget->bIsVariable);
-			WidgetObject->SetStringField(TEXT("visibility"), WidgetVisibilityToString(Widget->GetVisibility()));
-			WidgetObject->SetObjectField(TEXT("render_transform"), BuildWidgetTransformSnapshot(Widget->GetRenderTransform()));
-			WidgetObject->SetObjectField(TEXT("render_transform_pivot"), BuildVector2DSnapshot(Widget->GetRenderTransformPivot()));
-			if (const UPanelWidget* ParentWidget = Widget->GetParent())
-			{
-				WidgetObject->SetStringField(TEXT("parent_widget"), ParentWidget->GetName());
-				WidgetObject->SetStringField(TEXT("parent_widget_class"), ParentWidget->GetClass() != nullptr ? ParentWidget->GetClass()->GetPathName() : FString());
-			}
-			if (Widget->Slot != nullptr)
-			{
-				WidgetObject->SetStringField(TEXT("slot_class"), Widget->Slot->GetClass()->GetPathName());
-			}
-			AddWidgetSlotSnapshot(Widget, WidgetObject);
-			AddWidgetTypeSpecificSnapshot(Widget, WidgetObject);
-			WidgetValues.Add(MakeShared<FJsonValueObject>(WidgetObject));
+			WidgetValues.Add(MakeShared<FJsonValueObject>(BuildWidgetSnapshot(Widget)));
 		});
 		SnapshotObject->SetNumberField(TEXT("widget_count"), WidgetValues.Num());
 		SnapshotObject->SetArrayField(TEXT("widgets"), WidgetValues);
+		return SnapshotObject;
+	}
+
+	static TSharedPtr<FJsonObject> BuildWidgetDetailsSnapshot(const FString& WidgetBlueprintPath, const FString& WidgetName)
+	{
+		const FString NormalizedPath = NormalizeAssetPackagePath(WidgetBlueprintPath);
+		const FString TargetWidgetName = WidgetName.TrimStartAndEnd();
+		if (NormalizedPath.IsEmpty())
+		{
+			return MakeToolErrorObject(TEXT("missing_widget_blueprint_path"), TEXT("widget_blueprint_path is required."));
+		}
+		if (TargetWidgetName.IsEmpty())
+		{
+			return MakeToolErrorObject(TEXT("missing_widget_name"), TEXT("widget_name is required."));
+		}
+
+		UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprintAsset(NormalizedPath);
+		if (WidgetBlueprint == nullptr)
+		{
+			return MakeToolErrorObject(TEXT("widget_blueprint_not_found"), FString::Printf(TEXT("Widget Blueprint not found: %s"), *NormalizedPath));
+		}
+		if (WidgetBlueprint->WidgetTree == nullptr)
+		{
+			return MakeToolErrorObject(TEXT("widget_tree_missing"), FString::Printf(TEXT("Widget Tree not found: %s"), *NormalizedPath));
+		}
+
+		UWidget* MatchedWidget = nullptr;
+		WidgetBlueprint->WidgetTree->ForEachWidget([&MatchedWidget, &TargetWidgetName](UWidget* Widget)
+		{
+			if (Widget != nullptr && MatchedWidget == nullptr && Widget->GetName().Equals(TargetWidgetName, ESearchCase::IgnoreCase))
+			{
+				MatchedWidget = Widget;
+			}
+		});
+		if (MatchedWidget == nullptr)
+		{
+			return MakeToolErrorObject(TEXT("widget_not_found"), FString::Printf(TEXT("Widget not found: %s in %s"), *TargetWidgetName, *NormalizedPath));
+		}
+
+		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
+		SnapshotObject->SetStringField(TEXT("widget_detail_schema_version"), TEXT("ue_agent_widget_details_v1"));
+		SnapshotObject->SetStringField(TEXT("widget_blueprint_path"), NormalizedPath);
+		SnapshotObject->SetStringField(TEXT("widget_blueprint_name"), WidgetBlueprint->GetName());
+		SnapshotObject->SetStringField(TEXT("requested_widget_name"), TargetWidgetName);
+		SnapshotObject->SetStringField(TEXT("widget_name"), MatchedWidget->GetName());
+		SnapshotObject->SetObjectField(TEXT("widget"), BuildWidgetSnapshot(MatchedWidget));
+
+		TArray<TSharedPtr<FJsonValue>> ChildValues;
+		if (const UPanelWidget* PanelWidget = Cast<UPanelWidget>(MatchedWidget))
+		{
+			for (int32 Index = 0; Index < PanelWidget->GetChildrenCount(); ++Index)
+			{
+				if (UWidget* ChildWidget = PanelWidget->GetChildAt(Index))
+				{
+					ChildValues.Add(MakeShared<FJsonValueObject>(BuildWidgetSnapshot(ChildWidget)));
+				}
+				if (ChildValues.Num() >= 64)
+				{
+					break;
+				}
+			}
+		}
+		SnapshotObject->SetNumberField(TEXT("child_count"), ChildValues.Num());
+		SnapshotObject->SetArrayField(TEXT("children"), ChildValues);
+		if (WidgetBlueprint->WidgetTree->RootWidget != nullptr)
+		{
+			SnapshotObject->SetStringField(TEXT("root_widget"), WidgetBlueprint->WidgetTree->RootWidget->GetName());
+		}
 		return SnapshotObject;
 	}
 
@@ -1825,6 +1903,31 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 		}
 		return BuildWidgetTreeResult(WidgetBlueprintPath);
 	}
+	if (ToolName.Equals(TEXT("get_widget_details"), ESearchCase::IgnoreCase))
+	{
+		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
+		const TSharedPtr<FJsonObject> ArgumentsObject = ParamsObject.IsValid() && ParamsObject->TryGetObjectField(TEXT("arguments"), ArgumentsField) && ArgumentsField != nullptr ? *ArgumentsField : nullptr;
+		FString WidgetBlueprintPath;
+		FString WidgetName;
+		if (ArgumentsObject.IsValid())
+		{
+			ArgumentsObject->TryGetStringField(TEXT("widget_blueprint_path"), WidgetBlueprintPath);
+			if (WidgetBlueprintPath.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("blueprint_path"), WidgetBlueprintPath);
+			}
+			ArgumentsObject->TryGetStringField(TEXT("widget_name"), WidgetName);
+			if (WidgetName.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("target_widget"), WidgetName);
+			}
+			if (WidgetName.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("query"), WidgetName);
+			}
+		}
+		return BuildWidgetDetailsResult(WidgetBlueprintPath, WidgetName);
+	}
 	if (ToolName.Equals(TEXT("get_material_instance_parameters"), ESearchCase::IgnoreCase))
 	{
 		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
@@ -2112,6 +2215,45 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildWidgetTreeResult(const FS
 		if (!bCompleted)
 		{
 			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading Widget Tree metadata on the game thread."));
+		}
+	}
+
+	TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ContentValues;
+	TSharedPtr<FJsonObject> TextContent = MakeShared<FJsonObject>();
+	TextContent->SetStringField(TEXT("type"), TEXT("text"));
+	TextContent->SetStringField(TEXT("text"), SerializeJsonObject(SnapshotObject));
+	ContentValues.Add(MakeShared<FJsonValueObject>(TextContent));
+	ResultObject->SetArrayField(TEXT("content"), ContentValues);
+	const TSharedPtr<FJsonObject> StructuredObject = SnapshotObject.IsValid() ? SnapshotObject : MakeShared<FJsonObject>();
+	ResultObject->SetObjectField(TEXT("structuredContent"), StructuredObject);
+	if (SnapshotObject.IsValid() && SnapshotObject->HasField(TEXT("reason")))
+	{
+		ResultObject->SetBoolField(TEXT("isError"), true);
+	}
+	return ResultObject;
+}
+
+TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildWidgetDetailsResult(const FString& WidgetBlueprintPath, const FString& WidgetName) const
+{
+	TSharedPtr<FJsonObject> SnapshotObject;
+	if (IsInGameThread())
+	{
+		SnapshotObject = UEAgentEditorToolServerPrivate::BuildWidgetDetailsSnapshot(WidgetBlueprintPath, WidgetName);
+	}
+	else
+	{
+		FEvent* CompletionEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [WidgetBlueprintPath, WidgetName, &SnapshotObject, CompletionEvent]()
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::BuildWidgetDetailsSnapshot(WidgetBlueprintPath, WidgetName);
+			CompletionEvent->Trigger();
+		});
+		const bool bCompleted = CompletionEvent->Wait(FTimespan::FromSeconds(3));
+		FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		if (!bCompleted)
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading Widget details on the game thread."));
 		}
 	}
 

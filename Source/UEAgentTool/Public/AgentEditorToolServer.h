@@ -37,6 +37,7 @@ private:
 	TSharedPtr<FJsonObject> BuildStaticMeshDetailsResult(const FString& StaticMeshPathOrQuery) const;
 	TSharedPtr<FJsonObject> BuildBlueprintGraphResult(const FString& BlueprintPath) const;
 	TSharedPtr<FJsonObject> BuildWidgetTreeResult(const FString& WidgetBlueprintPath) const;
+	TSharedPtr<FJsonObject> BuildWidgetDetailsResult(const FString& WidgetBlueprintPath, const FString& WidgetName) const;
 	TSharedPtr<FJsonObject> BuildMaterialInstanceParametersResult(const FString& MaterialInstancePath) const;
 
 	static TSharedPtr<FJsonObject> ParseJsonObject(const FString& Text);
