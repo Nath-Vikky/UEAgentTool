@@ -161,6 +161,14 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("query"), TEXT("class_contains"), TEXT("tag"), TEXT("folder_path"), TEXT("limit") },
 		TEXT("read_only")));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("get_level_actor_details")),
+		TEXT("get_level_actor_details"),
+		TEXT("Read one live Level Actor's transform, tags, folder, class, and components through the optional TCP tool server."),
+		TEXT("level"),
+		{ TEXT("actor_reference") },
+		{ TEXT("query"), TEXT("actor_label"), TEXT("actor_name"), TEXT("actor_path") },
+		TEXT("read_only")));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("get_blueprint_graph")),
 		TEXT("get_blueprint_graph"),
 		TEXT("Read Blueprint graph metadata through the optional TCP tool server."),
