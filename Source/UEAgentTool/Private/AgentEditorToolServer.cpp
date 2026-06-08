@@ -676,6 +676,45 @@ namespace UEAgentEditorToolServerPrivate
 		}
 	}
 
+	static TSharedPtr<FJsonObject> BuildBlueprintNodeSnapshot(
+		const UEdGraphNode* Node,
+		int32& OutPinCount,
+		int32& OutLinkCount)
+	{
+		TSharedPtr<FJsonObject> NodeObject = MakeShared<FJsonObject>();
+		OutPinCount = 0;
+		OutLinkCount = 0;
+		if (Node == nullptr)
+		{
+			return NodeObject;
+		}
+
+		NodeObject->SetStringField(TEXT("node_id"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+		NodeObject->SetStringField(TEXT("node_name"), Node->GetName());
+		NodeObject->SetStringField(TEXT("node_class"), Node->GetClass() != nullptr ? Node->GetClass()->GetName() : TEXT("unknown"));
+		NodeObject->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+		NodeObject->SetNumberField(TEXT("x"), Node->NodePosX);
+		NodeObject->SetNumberField(TEXT("y"), Node->NodePosY);
+		if (!Node->NodeComment.IsEmpty())
+		{
+			NodeObject->SetStringField(TEXT("comment"), Node->NodeComment);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> PinValues;
+		int32 InputPinCount = 0;
+		int32 OutputPinCount = 0;
+		int32 NodeLinkCount = 0;
+		AddPinSummaries(Node, PinValues, InputPinCount, OutputPinCount, NodeLinkCount);
+		NodeObject->SetNumberField(TEXT("pin_count"), Node->Pins.Num());
+		NodeObject->SetNumberField(TEXT("input_pin_count"), InputPinCount);
+		NodeObject->SetNumberField(TEXT("output_pin_count"), OutputPinCount);
+		NodeObject->SetNumberField(TEXT("link_count"), NodeLinkCount);
+		NodeObject->SetArrayField(TEXT("pins"), PinValues);
+		OutPinCount = Node->Pins.Num();
+		OutLinkCount = NodeLinkCount;
+		return NodeObject;
+	}
+
 	static void AddGraphSummaries(
 		const TArray<UEdGraph*>& Graphs,
 		const FString& GraphType,
@@ -705,30 +744,10 @@ namespace UEAgentEditorToolServerPrivate
 				{
 					continue;
 				}
-				TSharedPtr<FJsonObject> NodeObject = MakeShared<FJsonObject>();
-				NodeObject->SetStringField(TEXT("node_id"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
-				NodeObject->SetStringField(TEXT("node_name"), Node->GetName());
-				NodeObject->SetStringField(TEXT("node_class"), Node->GetClass() != nullptr ? Node->GetClass()->GetName() : TEXT("unknown"));
-				NodeObject->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
-				NodeObject->SetNumberField(TEXT("x"), Node->NodePosX);
-				NodeObject->SetNumberField(TEXT("y"), Node->NodePosY);
-				if (!Node->NodeComment.IsEmpty())
-				{
-					NodeObject->SetStringField(TEXT("comment"), Node->NodeComment);
-				}
-
-				TArray<TSharedPtr<FJsonValue>> PinValues;
-				int32 InputPinCount = 0;
-				int32 OutputPinCount = 0;
+				int32 NodePinCount = 0;
 				int32 NodeLinkCount = 0;
-				AddPinSummaries(Node, PinValues, InputPinCount, OutputPinCount, NodeLinkCount);
-				NodeObject->SetNumberField(TEXT("pin_count"), Node->Pins.Num());
-				NodeObject->SetNumberField(TEXT("input_pin_count"), InputPinCount);
-				NodeObject->SetNumberField(TEXT("output_pin_count"), OutputPinCount);
-				NodeObject->SetNumberField(TEXT("link_count"), NodeLinkCount);
-				NodeObject->SetArrayField(TEXT("pins"), PinValues);
-
-				GraphPinCount += Node->Pins.Num();
+				TSharedPtr<FJsonObject> NodeObject = BuildBlueprintNodeSnapshot(Node, NodePinCount, NodeLinkCount);
+				GraphPinCount += NodePinCount;
 				GraphLinkCount += NodeLinkCount;
 				NodeValues.Add(MakeShared<FJsonValueObject>(NodeObject));
 				if (NodeValues.Num() >= 64)
@@ -1401,6 +1420,119 @@ namespace UEAgentEditorToolServerPrivate
 		return SnapshotObject;
 	}
 
+	static bool BlueprintNodeMatchesQuery(const UEdGraphNode* Node, const FString& NodeQuery)
+	{
+		if (Node == nullptr || NodeQuery.TrimStartAndEnd().IsEmpty())
+		{
+			return false;
+		}
+		const FString Query = NodeQuery.TrimStartAndEnd();
+		const FString NodeId = Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens);
+		const FString NodeName = Node->GetName();
+		const FString NodeClass = Node->GetClass() != nullptr ? Node->GetClass()->GetName() : FString();
+		const FString NodeTitle = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
+		return NodeId.Equals(Query, ESearchCase::IgnoreCase)
+			|| NodeName.Contains(Query, ESearchCase::IgnoreCase)
+			|| NodeClass.Contains(Query, ESearchCase::IgnoreCase)
+			|| NodeTitle.Contains(Query, ESearchCase::IgnoreCase);
+	}
+
+	static bool GraphMatchesQuery(const UEdGraph* Graph, const FString& GraphName)
+	{
+		if (Graph == nullptr)
+		{
+			return false;
+		}
+		const FString Query = GraphName.TrimStartAndEnd();
+		return Query.IsEmpty() || Graph->GetName().Contains(Query, ESearchCase::IgnoreCase);
+	}
+
+	static void FindBlueprintNodeInGraphs(
+		const TArray<UEdGraph*>& Graphs,
+		const FString& GraphType,
+		const FString& GraphName,
+		const FString& NodeQuery,
+		const UEdGraph*& OutGraph,
+		FString& OutGraphType,
+		const UEdGraphNode*& OutNode)
+	{
+		for (const UEdGraph* Graph : Graphs)
+		{
+			if (Graph == nullptr || !GraphMatchesQuery(Graph, GraphName))
+			{
+				continue;
+			}
+			for (const UEdGraphNode* Node : Graph->Nodes)
+			{
+				if (BlueprintNodeMatchesQuery(Node, NodeQuery))
+				{
+					OutGraph = Graph;
+					OutGraphType = GraphType;
+					OutNode = Node;
+					return;
+				}
+			}
+		}
+	}
+
+	static TSharedPtr<FJsonObject> BuildBlueprintNodeDetailsSnapshot(const FString& BlueprintPath, const FString& GraphName, const FString& NodeQuery)
+	{
+		const FString NormalizedPath = NormalizeAssetPackagePath(BlueprintPath);
+		const FString TargetNodeQuery = NodeQuery.TrimStartAndEnd();
+		if (NormalizedPath.IsEmpty())
+		{
+			return MakeToolErrorObject(TEXT("missing_blueprint_path"), TEXT("blueprint_path is required."));
+		}
+		if (TargetNodeQuery.IsEmpty())
+		{
+			return MakeToolErrorObject(TEXT("missing_node_query"), TEXT("node_query is required."));
+		}
+		UBlueprint* Blueprint = LoadBlueprintAsset(NormalizedPath);
+		if (Blueprint == nullptr)
+		{
+			return MakeToolErrorObject(TEXT("blueprint_not_found"), FString::Printf(TEXT("Blueprint not found: %s"), *NormalizedPath));
+		}
+
+		const UEdGraph* MatchedGraph = nullptr;
+		const UEdGraphNode* MatchedNode = nullptr;
+		FString MatchedGraphType;
+#if WITH_EDITORONLY_DATA
+		FindBlueprintNodeInGraphs(Blueprint->UbergraphPages, TEXT("event"), GraphName, TargetNodeQuery, MatchedGraph, MatchedGraphType, MatchedNode);
+		if (MatchedNode == nullptr)
+		{
+			FindBlueprintNodeInGraphs(Blueprint->FunctionGraphs, TEXT("function"), GraphName, TargetNodeQuery, MatchedGraph, MatchedGraphType, MatchedNode);
+		}
+		if (MatchedNode == nullptr)
+		{
+			FindBlueprintNodeInGraphs(Blueprint->MacroGraphs, TEXT("macro"), GraphName, TargetNodeQuery, MatchedGraph, MatchedGraphType, MatchedNode);
+		}
+#endif
+		if (MatchedNode == nullptr || MatchedGraph == nullptr)
+		{
+			return MakeToolErrorObject(TEXT("blueprint_node_not_found"), FString::Printf(TEXT("Blueprint node not found: %s in %s"), *TargetNodeQuery, *NormalizedPath));
+		}
+
+		int32 NodePinCount = 0;
+		int32 NodeLinkCount = 0;
+		TSharedPtr<FJsonObject> NodeObject = BuildBlueprintNodeSnapshot(MatchedNode, NodePinCount, NodeLinkCount);
+		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
+		SnapshotObject->SetStringField(TEXT("blueprint_node_detail_schema_version"), TEXT("ue_agent_blueprint_node_details_v1"));
+		SnapshotObject->SetStringField(TEXT("blueprint_path"), NormalizedPath);
+		SnapshotObject->SetStringField(TEXT("blueprint_name"), Blueprint->GetName());
+		SnapshotObject->SetStringField(TEXT("requested_node_query"), TargetNodeQuery);
+		SnapshotObject->SetStringField(TEXT("graph_name"), MatchedGraph->GetName());
+		SnapshotObject->SetStringField(TEXT("graph_type"), MatchedGraphType);
+		SnapshotObject->SetNumberField(TEXT("graph_node_count"), MatchedGraph->Nodes.Num());
+		SnapshotObject->SetStringField(TEXT("node_id"), MatchedNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+		SnapshotObject->SetStringField(TEXT("node_title"), MatchedNode->GetNodeTitle(ENodeTitleType::ListView).ToString());
+		SnapshotObject->SetStringField(TEXT("node_class"), MatchedNode->GetClass() != nullptr ? MatchedNode->GetClass()->GetName() : TEXT("unknown"));
+		SnapshotObject->SetObjectField(TEXT("node"), NodeObject);
+		SnapshotObject->SetArrayField(TEXT("pins"), NodeObject->GetArrayField(TEXT("pins")));
+		SnapshotObject->SetNumberField(TEXT("pin_count"), NodePinCount);
+		SnapshotObject->SetNumberField(TEXT("link_count"), NodeLinkCount);
+		return SnapshotObject;
+	}
+
 	static UWidgetBlueprint* LoadWidgetBlueprintAsset(const FString& WidgetBlueprintPath)
 	{
 		const FString PackagePath = NormalizeAssetPackagePath(WidgetBlueprintPath);
@@ -1888,6 +2020,45 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 		}
 		return BuildBlueprintGraphResult(BlueprintPath);
 	}
+	if (ToolName.Equals(TEXT("get_blueprint_node_details"), ESearchCase::IgnoreCase))
+	{
+		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
+		const TSharedPtr<FJsonObject> ArgumentsObject = ParamsObject.IsValid() && ParamsObject->TryGetObjectField(TEXT("arguments"), ArgumentsField) && ArgumentsField != nullptr ? *ArgumentsField : nullptr;
+		FString BlueprintPath;
+		FString GraphName;
+		FString NodeQuery;
+		if (ArgumentsObject.IsValid())
+		{
+			ArgumentsObject->TryGetStringField(TEXT("blueprint_path"), BlueprintPath);
+			if (BlueprintPath.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("asset_path"), BlueprintPath);
+			}
+			ArgumentsObject->TryGetStringField(TEXT("graph_name"), GraphName);
+			ArgumentsObject->TryGetStringField(TEXT("node_query"), NodeQuery);
+			if (NodeQuery.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("node_id"), NodeQuery);
+			}
+			if (NodeQuery.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("node_name"), NodeQuery);
+			}
+			if (NodeQuery.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("node_title"), NodeQuery);
+			}
+			if (NodeQuery.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("target_node"), NodeQuery);
+			}
+			if (NodeQuery.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("query"), NodeQuery);
+			}
+		}
+		return BuildBlueprintNodeDetailsResult(BlueprintPath, GraphName, NodeQuery);
+	}
 	if (ToolName.Equals(TEXT("get_widget_tree"), ESearchCase::IgnoreCase))
 	{
 		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
@@ -2176,6 +2347,45 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildBlueprintGraphResult(cons
 		if (!bCompleted)
 		{
 			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading Blueprint graph metadata on the game thread."));
+		}
+	}
+
+	TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ContentValues;
+	TSharedPtr<FJsonObject> TextContent = MakeShared<FJsonObject>();
+	TextContent->SetStringField(TEXT("type"), TEXT("text"));
+	TextContent->SetStringField(TEXT("text"), SerializeJsonObject(SnapshotObject));
+	ContentValues.Add(MakeShared<FJsonValueObject>(TextContent));
+	ResultObject->SetArrayField(TEXT("content"), ContentValues);
+	const TSharedPtr<FJsonObject> StructuredObject = SnapshotObject.IsValid() ? SnapshotObject : MakeShared<FJsonObject>();
+	ResultObject->SetObjectField(TEXT("structuredContent"), StructuredObject);
+	if (SnapshotObject.IsValid() && SnapshotObject->HasField(TEXT("reason")))
+	{
+		ResultObject->SetBoolField(TEXT("isError"), true);
+	}
+	return ResultObject;
+}
+
+TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildBlueprintNodeDetailsResult(const FString& BlueprintPath, const FString& GraphName, const FString& NodeQuery) const
+{
+	TSharedPtr<FJsonObject> SnapshotObject;
+	if (IsInGameThread())
+	{
+		SnapshotObject = UEAgentEditorToolServerPrivate::BuildBlueprintNodeDetailsSnapshot(BlueprintPath, GraphName, NodeQuery);
+	}
+	else
+	{
+		FEvent* CompletionEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [BlueprintPath, GraphName, NodeQuery, &SnapshotObject, CompletionEvent]()
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::BuildBlueprintNodeDetailsSnapshot(BlueprintPath, GraphName, NodeQuery);
+			CompletionEvent->Trigger();
+		});
+		const bool bCompleted = CompletionEvent->Wait(FTimespan::FromSeconds(3));
+		FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		if (!bCompleted)
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading Blueprint node details on the game thread."));
 		}
 	}
 

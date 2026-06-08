@@ -169,6 +169,14 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{},
 		TEXT("read_only")));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("get_blueprint_node_details")),
+		TEXT("get_blueprint_node_details"),
+		TEXT("Read one Blueprint graph node's live title, class, pins, links, and graph metadata through the optional TCP tool server."),
+		TEXT("blueprint"),
+		{ TEXT("blueprint_path"), TEXT("node_query") },
+		{ TEXT("graph_name"), TEXT("node_id"), TEXT("node_name"), TEXT("node_title"), TEXT("target_node"), TEXT("query") },
+		TEXT("read_only")));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("get_widget_tree")),
 		TEXT("get_widget_tree"),
 		TEXT("Read UMG Widget Blueprint tree metadata through the optional TCP tool server."),
