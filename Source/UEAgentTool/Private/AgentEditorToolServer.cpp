@@ -23,6 +23,7 @@
 #include "Components/SceneComponent.h"
 #include "Components/PanelSlot.h"
 #include "Components/Widget.h"
+#include "Engine/Texture.h"
 #include "Common/TcpListener.h"
 #include "Containers/StringConv.h"
 #include "Dom/JsonObject.h"
@@ -35,6 +36,7 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/PackageName.h"
 #include "Misc/ScopeLock.h"
+#include "Materials/MaterialInstance.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "SocketSubsystem.h"
@@ -196,6 +198,182 @@ namespace UEAgentEditorToolServerPrivate
 	{
 		const FString PackagePath = NormalizeAssetPackagePath(BlueprintPath);
 		return Cast<UBlueprint>(StaticLoadObject(UBlueprint::StaticClass(), nullptr, *ToObjectPath(PackagePath)));
+	}
+
+	static UMaterialInstance* LoadMaterialInstanceAsset(const FString& MaterialInstancePath)
+	{
+		if (MaterialInstancePath.TrimStartAndEnd().IsEmpty())
+		{
+			return nullptr;
+		}
+		const FString PackagePath = NormalizeAssetPackagePath(MaterialInstancePath);
+		return Cast<UMaterialInstance>(StaticLoadObject(UMaterialInstance::StaticClass(), nullptr, *ToObjectPath(PackagePath)));
+	}
+
+	static TSharedPtr<FJsonObject> MakeMaterialColorObject(const FLinearColor& Color)
+	{
+		TSharedPtr<FJsonObject> ColorObject = MakeShared<FJsonObject>();
+		ColorObject->SetNumberField(TEXT("r"), Color.R);
+		ColorObject->SetNumberField(TEXT("g"), Color.G);
+		ColorObject->SetNumberField(TEXT("b"), Color.B);
+		ColorObject->SetNumberField(TEXT("a"), Color.A);
+		return ColorObject;
+	}
+
+	static TSharedPtr<FJsonObject> MakeMaterialParameterObject(const FMaterialParameterInfo& ParameterInfo, const FString& ParameterType)
+	{
+		TSharedPtr<FJsonObject> ParameterObject = MakeShared<FJsonObject>();
+		ParameterObject->SetStringField(TEXT("name"), ParameterInfo.Name.ToString());
+		ParameterObject->SetStringField(TEXT("parameter_name"), ParameterInfo.Name.ToString());
+		ParameterObject->SetStringField(TEXT("parameter_type"), ParameterType);
+		return ParameterObject;
+	}
+
+	static void AddScalarMaterialParameters(
+		const UMaterialInstance* MaterialInstance,
+		TArray<TSharedPtr<FJsonValue>>& ParameterValues,
+		TArray<TSharedPtr<FJsonValue>>& AllParameterValues)
+	{
+		TArray<FMaterialParameterInfo> ParameterInfos;
+		TArray<FGuid> ParameterIds;
+		MaterialInstance->GetAllScalarParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			float Value = 0.0f;
+			TSharedPtr<FJsonObject> ParameterObject = MakeMaterialParameterObject(ParameterInfo, TEXT("scalar"));
+			if (MaterialInstance->GetScalarParameterValue(ParameterInfo, Value))
+			{
+				ParameterObject->SetNumberField(TEXT("value"), Value);
+			}
+			ParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			AllParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			if (ParameterValues.Num() >= 128)
+			{
+				break;
+			}
+		}
+	}
+
+	static void AddVectorMaterialParameters(
+		const UMaterialInstance* MaterialInstance,
+		TArray<TSharedPtr<FJsonValue>>& ParameterValues,
+		TArray<TSharedPtr<FJsonValue>>& AllParameterValues)
+	{
+		TArray<FMaterialParameterInfo> ParameterInfos;
+		TArray<FGuid> ParameterIds;
+		MaterialInstance->GetAllVectorParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			FLinearColor Value = FLinearColor::White;
+			TSharedPtr<FJsonObject> ParameterObject = MakeMaterialParameterObject(ParameterInfo, TEXT("vector"));
+			if (MaterialInstance->GetVectorParameterValue(ParameterInfo, Value))
+			{
+				ParameterObject->SetObjectField(TEXT("value"), MakeMaterialColorObject(Value));
+			}
+			ParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			AllParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			if (ParameterValues.Num() >= 128)
+			{
+				break;
+			}
+		}
+	}
+
+	static void AddTextureMaterialParameters(
+		const UMaterialInstance* MaterialInstance,
+		TArray<TSharedPtr<FJsonValue>>& ParameterValues,
+		TArray<TSharedPtr<FJsonValue>>& AllParameterValues)
+	{
+		TArray<FMaterialParameterInfo> ParameterInfos;
+		TArray<FGuid> ParameterIds;
+		MaterialInstance->GetAllTextureParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			UTexture* Value = nullptr;
+			TSharedPtr<FJsonObject> ParameterObject = MakeMaterialParameterObject(ParameterInfo, TEXT("texture"));
+			if (MaterialInstance->GetTextureParameterValue(ParameterInfo, Value) && Value != nullptr)
+			{
+				ParameterObject->SetStringField(TEXT("texture_path"), Value->GetPathName());
+				ParameterObject->SetStringField(TEXT("value"), Value->GetPathName());
+			}
+			ParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			AllParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			if (ParameterValues.Num() >= 128)
+			{
+				break;
+			}
+		}
+	}
+
+	static void AddStaticSwitchMaterialParameters(
+		const UMaterialInstance* MaterialInstance,
+		TArray<TSharedPtr<FJsonValue>>& ParameterValues,
+		TArray<TSharedPtr<FJsonValue>>& AllParameterValues)
+	{
+		TArray<FMaterialParameterInfo> ParameterInfos;
+		TArray<FGuid> ParameterIds;
+		MaterialInstance->GetAllStaticSwitchParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			bool bValue = false;
+			FGuid ExpressionGuid;
+			TSharedPtr<FJsonObject> ParameterObject = MakeMaterialParameterObject(ParameterInfo, TEXT("static_switch"));
+			if (MaterialInstance->GetStaticSwitchParameterValue(ParameterInfo, bValue, ExpressionGuid))
+			{
+				ParameterObject->SetBoolField(TEXT("value"), bValue);
+			}
+			ParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			AllParameterValues.Add(MakeShared<FJsonValueObject>(ParameterObject));
+			if (ParameterValues.Num() >= 128)
+			{
+				break;
+			}
+		}
+	}
+
+	static UMaterialInstance* ResolveMaterialInstanceAsset(
+		const FString& MaterialInstancePath,
+		FString& OutResolvedFrom,
+		FString& OutResolvedPath,
+		int32& OutSelectedAssetCount)
+	{
+		OutResolvedFrom = TEXT("");
+		OutResolvedPath = TEXT("");
+		OutSelectedAssetCount = 0;
+		if (!MaterialInstancePath.TrimStartAndEnd().IsEmpty())
+		{
+			if (UMaterialInstance* LoadedMaterialInstance = LoadMaterialInstanceAsset(MaterialInstancePath))
+			{
+				OutResolvedFrom = TEXT("argument");
+				OutResolvedPath = LoadedMaterialInstance->GetPathName();
+				return LoadedMaterialInstance;
+			}
+		}
+
+		if (!FModuleManager::Get().ModuleExists(TEXT("ContentBrowser")))
+		{
+			return nullptr;
+		}
+
+		TArray<FAssetData> SelectedAssets;
+		FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+		ContentBrowserModule.Get().GetSelectedAssets(SelectedAssets);
+		OutSelectedAssetCount = SelectedAssets.Num();
+		for (const FAssetData& AssetData : SelectedAssets)
+		{
+			if (!AssetData.IsValid())
+			{
+				continue;
+			}
+			UMaterialInstance* MaterialInstance = Cast<UMaterialInstance>(AssetData.GetAsset());
+			if (MaterialInstance != nullptr)
+			{
+				OutResolvedFrom = TEXT("content_browser_selection");
+				OutResolvedPath = AssetData.GetSoftObjectPath().ToString();
+				return MaterialInstance;
+			}
+		}
+		return nullptr;
 	}
 
 	static TSharedPtr<FJsonObject> MakeToolErrorObject(const FString& Reason, const FString& Message)
@@ -771,6 +949,55 @@ namespace UEAgentEditorToolServerPrivate
 		SnapshotObject->SetArrayField(TEXT("widgets"), WidgetValues);
 		return SnapshotObject;
 	}
+
+	static TSharedPtr<FJsonObject> BuildMaterialInstanceParametersSnapshot(const FString& MaterialInstancePath, const FString& ServerStatus)
+	{
+		FString ResolvedFrom;
+		FString ResolvedPath;
+		int32 SelectedAssetCount = 0;
+		UMaterialInstance* MaterialInstance = ResolveMaterialInstanceAsset(
+			MaterialInstancePath,
+			ResolvedFrom,
+			ResolvedPath,
+			SelectedAssetCount);
+		if (MaterialInstance == nullptr)
+		{
+			const FString ErrorMessage = MaterialInstancePath.TrimStartAndEnd().IsEmpty()
+				? FString(TEXT("No Material Instance path was provided and no selected Content Browser Material Instance was found."))
+				: FString::Printf(TEXT("Material Instance not found: %s"), *MaterialInstancePath);
+			return MakeToolErrorObject(
+				TEXT("material_instance_not_found"),
+				ErrorMessage);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> AllParameterValues;
+		TArray<TSharedPtr<FJsonValue>> ScalarValues;
+		TArray<TSharedPtr<FJsonValue>> VectorValues;
+		TArray<TSharedPtr<FJsonValue>> TextureValues;
+		TArray<TSharedPtr<FJsonValue>> StaticSwitchValues;
+		AddScalarMaterialParameters(MaterialInstance, ScalarValues, AllParameterValues);
+		AddVectorMaterialParameters(MaterialInstance, VectorValues, AllParameterValues);
+		AddTextureMaterialParameters(MaterialInstance, TextureValues, AllParameterValues);
+		AddStaticSwitchMaterialParameters(MaterialInstance, StaticSwitchValues, AllParameterValues);
+
+		TSharedPtr<FJsonObject> SnapshotObject = MakeShared<FJsonObject>();
+		SnapshotObject->SetStringField(TEXT("material_instance_schema_version"), TEXT("ue_agent_material_instance_parameters_v1"));
+		SnapshotObject->SetStringField(TEXT("transport"), TEXT("tcp_jsonrpc_line"));
+		SnapshotObject->SetStringField(TEXT("server_status"), ServerStatus);
+		SnapshotObject->SetStringField(TEXT("requested_material_instance_path"), MaterialInstancePath);
+		SnapshotObject->SetStringField(TEXT("resolved_from"), ResolvedFrom);
+		SnapshotObject->SetStringField(TEXT("material_instance_path"), !ResolvedPath.IsEmpty() ? ResolvedPath : MaterialInstance->GetPathName());
+		SnapshotObject->SetStringField(TEXT("material_instance_name"), MaterialInstance->GetName());
+		SnapshotObject->SetStringField(TEXT("parent_material"), MaterialInstance->Parent != nullptr ? MaterialInstance->Parent->GetPathName() : FString());
+		SnapshotObject->SetNumberField(TEXT("selected_asset_count"), SelectedAssetCount);
+		SnapshotObject->SetNumberField(TEXT("parameter_count"), AllParameterValues.Num());
+		SnapshotObject->SetArrayField(TEXT("parameters"), AllParameterValues);
+		SnapshotObject->SetArrayField(TEXT("scalar_parameters"), ScalarValues);
+		SnapshotObject->SetArrayField(TEXT("vector_parameters"), VectorValues);
+		SnapshotObject->SetArrayField(TEXT("texture_parameters"), TextureValues);
+		SnapshotObject->SetArrayField(TEXT("static_switch_parameters"), StaticSwitchValues);
+		return SnapshotObject;
+	}
 }
 
 FUEAgentEditorToolServer::FUEAgentEditorToolServer() = default;
@@ -1076,6 +1303,25 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildToolCallResult(const TSha
 		}
 		return BuildWidgetTreeResult(WidgetBlueprintPath);
 	}
+	if (ToolName.Equals(TEXT("get_material_instance_parameters"), ESearchCase::IgnoreCase))
+	{
+		const TSharedPtr<FJsonObject>* ArgumentsField = nullptr;
+		const TSharedPtr<FJsonObject> ArgumentsObject = ParamsObject.IsValid() && ParamsObject->TryGetObjectField(TEXT("arguments"), ArgumentsField) && ArgumentsField != nullptr ? *ArgumentsField : nullptr;
+		FString MaterialInstancePath;
+		if (ArgumentsObject.IsValid())
+		{
+			ArgumentsObject->TryGetStringField(TEXT("material_instance_path"), MaterialInstancePath);
+			if (MaterialInstancePath.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("asset_path"), MaterialInstancePath);
+			}
+			if (MaterialInstancePath.IsEmpty())
+			{
+				ArgumentsObject->TryGetStringField(TEXT("query"), MaterialInstancePath);
+			}
+		}
+		return BuildMaterialInstanceParametersResult(MaterialInstancePath);
+	}
 
 	ResultObject->SetBoolField(TEXT("isError"), true);
 	TextContent->SetStringField(TEXT("text"), FString::Printf(TEXT("Tool '%s' requires the existing HTTP Proposal confirmation flow and cannot be executed through raw MCP/TCP."), *ToolName));
@@ -1263,6 +1509,46 @@ TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildWidgetTreeResult(const FS
 		if (!bCompleted)
 		{
 			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading Widget Tree metadata on the game thread."));
+		}
+	}
+
+	TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> ContentValues;
+	TSharedPtr<FJsonObject> TextContent = MakeShared<FJsonObject>();
+	TextContent->SetStringField(TEXT("type"), TEXT("text"));
+	TextContent->SetStringField(TEXT("text"), SerializeJsonObject(SnapshotObject));
+	ContentValues.Add(MakeShared<FJsonValueObject>(TextContent));
+	ResultObject->SetArrayField(TEXT("content"), ContentValues);
+	const TSharedPtr<FJsonObject> StructuredObject = SnapshotObject.IsValid() ? SnapshotObject : MakeShared<FJsonObject>();
+	ResultObject->SetObjectField(TEXT("structuredContent"), StructuredObject);
+	if (SnapshotObject.IsValid() && SnapshotObject->HasField(TEXT("reason")))
+	{
+		ResultObject->SetBoolField(TEXT("isError"), true);
+	}
+	return ResultObject;
+}
+
+TSharedPtr<FJsonObject> FUEAgentEditorToolServer::BuildMaterialInstanceParametersResult(const FString& MaterialInstancePath) const
+{
+	TSharedPtr<FJsonObject> SnapshotObject;
+	const FString ServerStatus = GetStatusText();
+	if (IsInGameThread())
+	{
+		SnapshotObject = UEAgentEditorToolServerPrivate::BuildMaterialInstanceParametersSnapshot(MaterialInstancePath, ServerStatus);
+	}
+	else
+	{
+		FEvent* CompletionEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [MaterialInstancePath, ServerStatus, &SnapshotObject, CompletionEvent]()
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::BuildMaterialInstanceParametersSnapshot(MaterialInstancePath, ServerStatus);
+			CompletionEvent->Trigger();
+		});
+		const bool bCompleted = CompletionEvent->Wait(FTimespan::FromSeconds(3));
+		FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
+		if (!bCompleted)
+		{
+			SnapshotObject = UEAgentEditorToolServerPrivate::MakeToolErrorObject(TEXT("game_thread_timeout"), TEXT("Timed out while reading Material Instance parameters on the game thread."));
 		}
 	}
 

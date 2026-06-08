@@ -35,6 +35,7 @@ private:
 	TSharedPtr<FJsonObject> BuildSelectedActorsResult() const;
 	TSharedPtr<FJsonObject> BuildBlueprintGraphResult(const FString& BlueprintPath) const;
 	TSharedPtr<FJsonObject> BuildWidgetTreeResult(const FString& WidgetBlueprintPath) const;
+	TSharedPtr<FJsonObject> BuildMaterialInstanceParametersResult(const FString& MaterialInstancePath) const;
 
 	static TSharedPtr<FJsonObject> ParseJsonObject(const FString& Text);
 	static FString SerializeJsonObject(const TSharedPtr<FJsonObject>& JsonObject);
