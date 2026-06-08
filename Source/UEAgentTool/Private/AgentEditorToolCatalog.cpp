@@ -309,6 +309,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("actor_reference"), TEXT("transform_mode") },
 		{ TEXT("actor_name"), TEXT("actor_label"), TEXT("transform"), TEXT("transform_delta"), TEXT("reason"), TEXT("source_task_id") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("select_level_actors")),
+		TEXT("select_level_actors"),
+		TEXT("Select a bounded Actor set in the current editor level after backend Proposal confirmation."),
+		TEXT("level"),
+		{ TEXT("selection") },
+		{ TEXT("actor_references"), TEXT("query"), TEXT("class_contains"), TEXT("tag"), TEXT("folder_path"), TEXT("max_count"), TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("set_actor_metadata")),
 		TEXT("set_actor_metadata"),
 		TEXT("Update one Actor label, folder, or tags in the current editor level after backend Proposal confirmation."),

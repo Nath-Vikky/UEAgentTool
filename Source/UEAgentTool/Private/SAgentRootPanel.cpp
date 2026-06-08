@@ -5491,6 +5491,203 @@ namespace UEAgentRootPanelPrivate
 		return nullptr;
 	}
 
+	static bool ActorMatchesSelectionFilter(AActor* Actor, const FString& Query, const FString& ClassContains, const FString& Tag, const FString& FolderPath)
+	{
+		if (Actor == nullptr || Actor->IsPendingKillPending())
+		{
+			return false;
+		}
+
+		if (!Query.IsEmpty())
+		{
+			const FString QueryLower = Query.ToLower();
+			const FString LabelLower = Actor->GetActorLabel().ToLower();
+			const FString NameLower = Actor->GetName().ToLower();
+			const FString PathLower = Actor->GetPathName().ToLower();
+			if (!LabelLower.Contains(QueryLower) && !NameLower.Contains(QueryLower) && !PathLower.Contains(QueryLower))
+			{
+				return false;
+			}
+		}
+
+		if (!ClassContains.IsEmpty())
+		{
+			const FString ClassNeedle = ClassContains.ToLower();
+			const UClass* ActorClass = Actor->GetClass();
+			const FString ClassName = ActorClass != nullptr ? ActorClass->GetName().ToLower() : FString();
+			const FString ClassPath = ActorClass != nullptr ? ActorClass->GetPathName().ToLower() : FString();
+			if (!ClassName.Contains(ClassNeedle) && !ClassPath.Contains(ClassNeedle))
+			{
+				return false;
+			}
+		}
+
+		if (!Tag.IsEmpty())
+		{
+			bool bHasTag = false;
+			for (const FName& ActorTag : Actor->Tags)
+			{
+				if (ActorTag.ToString().Equals(Tag, ESearchCase::IgnoreCase))
+				{
+					bHasTag = true;
+					break;
+				}
+			}
+			if (!bHasTag)
+			{
+				return false;
+			}
+		}
+
+		if (!FolderPath.IsEmpty())
+		{
+			const FString ActorFolder = Actor->GetFolderPath().ToString();
+			if (!ActorFolder.Contains(FolderPath, ESearchCase::IgnoreCase))
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	static FEditorOperationExecutionResult ExecuteSelectLevelActors(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("GEditor.SelectActor"));
+
+		const TSharedPtr<FJsonObject> SelectionObject = GetObjectField(PayloadObject, TEXT("selection"));
+		if (!SelectionObject.IsValid())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("selection is required."));
+			return ExecutionResult;
+		}
+		if (GEditor == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("editor_unavailable"), TEXT("GEditor is unavailable."));
+			return ExecutionResult;
+		}
+
+		UWorld* EditorWorld = GEditor->GetEditorWorldContext().World();
+		if (EditorWorld == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("editor_world_unavailable"), TEXT("No editable level is currently available."));
+			return ExecutionResult;
+		}
+
+		const TArray<FString> ActorReferences = GetStringArrayField(SelectionObject, TEXT("actor_references"));
+		const FString Query = GetScalarFieldAsString(SelectionObject, TEXT("query")).TrimStartAndEnd();
+		const FString ClassContains = GetScalarFieldAsString(SelectionObject, TEXT("class_contains")).TrimStartAndEnd();
+		const FString Tag = GetScalarFieldAsString(SelectionObject, TEXT("tag")).TrimStartAndEnd();
+		FString FolderPath = GetScalarFieldAsString(SelectionObject, TEXT("folder_path")).TrimStartAndEnd();
+		FolderPath.ReplaceInline(TEXT("\\"), TEXT("/"));
+		FolderPath.RemoveFromStart(TEXT("/"));
+		FolderPath.RemoveFromEnd(TEXT("/"));
+		int32 MaxCount = 20;
+		TryGetIntegerField(SelectionObject, TEXT("max_count"), MaxCount);
+		MaxCount = FMath::Clamp(MaxCount, 1, 50);
+
+		TArray<AActor*> MatchedActors;
+		TSet<AActor*> SeenActors;
+		for (const FString& ActorReference : ActorReferences)
+		{
+			AActor* Actor = FindActorByReference(EditorWorld, ActorReference);
+			if (Actor == nullptr)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("actor_not_found"), ActorReference);
+				return ExecutionResult;
+			}
+			if (!SeenActors.Contains(Actor))
+			{
+				SeenActors.Add(Actor);
+				MatchedActors.Add(Actor);
+			}
+		}
+
+		const bool bHasFilter = !Query.IsEmpty() || !ClassContains.IsEmpty() || !Tag.IsEmpty() || !FolderPath.IsEmpty();
+		if (bHasFilter)
+		{
+			for (ULevel* Level : EditorWorld->GetLevels())
+			{
+				if (Level == nullptr)
+				{
+					continue;
+				}
+				for (AActor* Actor : Level->Actors)
+				{
+					if (!ActorMatchesSelectionFilter(Actor, Query, ClassContains, Tag, FolderPath))
+					{
+						continue;
+					}
+					if (!SeenActors.Contains(Actor))
+					{
+						SeenActors.Add(Actor);
+						MatchedActors.Add(Actor);
+					}
+					if (MatchedActors.Num() >= MaxCount)
+					{
+						break;
+					}
+				}
+				if (MatchedActors.Num() >= MaxCount)
+				{
+					break;
+				}
+			}
+		}
+
+		if (MatchedActors.Num() == 0)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("no_actors_matched_selection"), TEXT("No Level Actors matched the selection criteria."));
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Select Level Actors")));
+		GEditor->SelectNone(false, true, false);
+		for (AActor* Actor : MatchedActors)
+		{
+			GEditor->SelectActor(Actor, true, false);
+		}
+		GEditor->NoteSelectionChange();
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor selection history or select previous Actors manually. No asset or level package is saved.");
+		ExecutionResult.ResultObject->SetNumberField(TEXT("selected_actor_count"), MatchedActors.Num());
+		ExecutionResult.ResultObject->SetBoolField(TEXT("selection_changed"), true);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("selection_only_no_save"));
+		if (!Query.IsEmpty())
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("query"), Query);
+		}
+		if (!ClassContains.IsEmpty())
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("class_contains"), ClassContains);
+		}
+		if (!Tag.IsEmpty())
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("tag"), Tag);
+		}
+		if (!FolderPath.IsEmpty())
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("folder_path"), FolderPath);
+		}
+		for (AActor* Actor : MatchedActors)
+		{
+			if (Actor != nullptr)
+			{
+				AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("selected_actors"), Actor->GetActorLabel());
+			}
+		}
+		return ExecutionResult;
+	}
+
 	static FEditorOperationExecutionResult ExecuteSetActorTransform(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -6193,6 +6390,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("set_actor_transform"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetActorTransform);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("select_level_actors"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSelectLevelActors);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("set_actor_metadata"), ESearchCase::IgnoreCase))
