@@ -131,7 +131,7 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("get_selected_assets")),
 		TEXT("get_selected_assets"),
-		TEXT("Read currently selected Content Browser assets through the optional TCP tool server."),
+		TEXT("Read currently selected Content Browser assets and Static Mesh detail through the optional TCP tool server."),
 		TEXT("asset"),
 		{},
 		{},

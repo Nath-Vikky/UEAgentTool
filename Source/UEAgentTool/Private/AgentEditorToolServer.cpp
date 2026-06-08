@@ -17,6 +17,7 @@
 #include "Engine/SCS_Node.h"
 #include "Engine/Selection.h"
 #include "Engine/SimpleConstructionScript.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "Components/ActorComponent.h"
@@ -37,6 +38,8 @@
 #include "Misc/PackageName.h"
 #include "Misc/ScopeLock.h"
 #include "Materials/MaterialInstance.h"
+#include "Materials/MaterialInterface.h"
+#include "PhysicsEngine/BodySetup.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "SocketSubsystem.h"
@@ -59,6 +62,66 @@ namespace UEAgentEditorToolServerPrivate
 			JsonValues.Add(MakeShared<FJsonValueString>(Value));
 		}
 		return JsonValues;
+	}
+
+	static FString CollisionTraceFlagToString(const ECollisionTraceFlag CollisionFlag)
+	{
+		switch (CollisionFlag)
+		{
+		case CTF_UseDefault:
+			return TEXT("project_default");
+		case CTF_UseSimpleAndComplex:
+			return TEXT("simple_and_complex");
+		case CTF_UseSimpleAsComplex:
+			return TEXT("use_simple_as_complex");
+		case CTF_UseComplexAsSimple:
+			return TEXT("use_complex_as_simple");
+		default:
+			return TEXT("unknown");
+		}
+	}
+
+	static void AddStaticMeshSelectedAssetDetails(const UStaticMesh* StaticMesh, const TSharedPtr<FJsonObject>& AssetObject)
+	{
+		if (StaticMesh == nullptr || !AssetObject.IsValid())
+		{
+			return;
+		}
+
+		TSharedPtr<FJsonObject> StaticMeshObject = MakeShared<FJsonObject>();
+#if WITH_EDITORONLY_DATA
+		StaticMeshObject->SetBoolField(TEXT("nanite_enabled"), StaticMesh->NaniteSettings.bEnabled);
+#endif
+		StaticMeshObject->SetNumberField(TEXT("lod_count"), StaticMesh->GetNumLODs());
+		StaticMeshObject->SetNumberField(TEXT("lightmap_resolution"), StaticMesh->GetLightMapResolution());
+
+		if (const UBodySetup* BodySetup = StaticMesh->GetBodySetup())
+		{
+			StaticMeshObject->SetStringField(TEXT("collision_complexity"), CollisionTraceFlagToString(BodySetup->CollisionTraceFlag));
+		}
+
+		constexpr int32 MaxMaterialSlotsReturned = 32;
+		const TArray<FStaticMaterial>& StaticMaterials = StaticMesh->GetStaticMaterials();
+		TArray<TSharedPtr<FJsonValue>> MaterialSlotValues;
+		for (const FStaticMaterial& StaticMaterial : StaticMaterials)
+		{
+			TSharedPtr<FJsonObject> SlotObject = MakeShared<FJsonObject>();
+			SlotObject->SetStringField(TEXT("slot_name"), StaticMaterial.MaterialSlotName.ToString());
+			if (StaticMaterial.MaterialInterface != nullptr)
+			{
+				SlotObject->SetStringField(TEXT("material_path"), StaticMaterial.MaterialInterface->GetPathName());
+			}
+			MaterialSlotValues.Add(MakeShared<FJsonValueObject>(SlotObject));
+			if (MaterialSlotValues.Num() >= MaxMaterialSlotsReturned)
+			{
+				break;
+			}
+		}
+
+		StaticMeshObject->SetNumberField(TEXT("material_slot_count"), StaticMaterials.Num());
+		StaticMeshObject->SetNumberField(TEXT("max_material_slots_returned"), MaxMaterialSlotsReturned);
+		StaticMeshObject->SetArrayField(TEXT("material_slots"), MaterialSlotValues);
+		AssetObject->SetObjectField(TEXT("static_mesh"), StaticMeshObject);
 	}
 
 	static TSharedPtr<FJsonObject> MakeInputSchema(const TArray<FString>& RequiredFields, const TArray<FString>& OptionalFields)
@@ -722,6 +785,10 @@ namespace UEAgentEditorToolServerPrivate
 			AssetObject->SetStringField(TEXT("asset_type"), AssetData.AssetClassPath.GetAssetName().ToString());
 			AssetObject->SetStringField(TEXT("package_name"), AssetData.PackageName.ToString());
 			AssetObject->SetStringField(TEXT("package_path"), AssetData.PackagePath.ToString());
+			if (const UStaticMesh* StaticMesh = Cast<UStaticMesh>(AssetData.GetAsset()))
+			{
+				AddStaticMeshSelectedAssetDetails(StaticMesh, AssetObject);
+			}
 			AssetValues.Add(MakeShared<FJsonValueObject>(AssetObject));
 			if (AssetValues.Num() >= MaxAssetsReturned)
 			{
