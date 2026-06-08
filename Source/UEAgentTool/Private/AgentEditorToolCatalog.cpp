@@ -316,6 +316,13 @@ TArray<FUEAgentEditorToolDefinition> FUEAgentEditorToolCatalog::BuildCoreEditorO
 		{ TEXT("selection") },
 		{ TEXT("actor_references"), TEXT("query"), TEXT("class_contains"), TEXT("tag"), TEXT("folder_path"), TEXT("max_count"), TEXT("reason"), TEXT("source_task_id") }));
 	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
+		FName(TEXT("set_actor_folder")),
+		TEXT("set_actor_folder"),
+		TEXT("Move a bounded Actor set into one World Outliner folder after backend Proposal confirmation."),
+		TEXT("level"),
+		{ TEXT("selection"), TEXT("target_folder_path") },
+		{ TEXT("actor_references"), TEXT("query"), TEXT("class_contains"), TEXT("tag"), TEXT("folder_path"), TEXT("max_count"), TEXT("reason"), TEXT("source_task_id") }));
+	Definitions.Add(UEAgentEditorToolCatalogPrivate::MakeTool(
 		FName(TEXT("set_actor_metadata")),
 		TEXT("set_actor_metadata"),
 		TEXT("Update one Actor label, folder, or tags in the current editor level after backend Proposal confirmation."),

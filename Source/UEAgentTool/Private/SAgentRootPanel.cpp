@@ -5688,6 +5688,166 @@ namespace UEAgentRootPanelPrivate
 		return ExecutionResult;
 	}
 
+	static FEditorOperationExecutionResult ExecuteSetActorFolder(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
+	{
+		FEditorOperationExecutionResult ExecutionResult;
+		ExecutionResult.MetadataObject->SetStringField(TEXT("ue_api"), TEXT("AActor.SetFolderPath batch"));
+
+		const TSharedPtr<FJsonObject> SelectionObject = GetObjectField(PayloadObject, TEXT("selection"));
+		FString TargetFolderPath = GetScalarFieldAsString(PayloadObject, TEXT("target_folder_path")).TrimStartAndEnd();
+		TargetFolderPath.ReplaceInline(TEXT("\\"), TEXT("/"));
+		TargetFolderPath.RemoveFromStart(TEXT("/"));
+		TargetFolderPath.RemoveFromEnd(TEXT("/"));
+		if (!SelectionObject.IsValid() || TargetFolderPath.IsEmpty())
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("missing_payload"), TEXT("selection and target_folder_path are required."));
+			return ExecutionResult;
+		}
+		if (GEditor == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("editor_unavailable"), TEXT("GEditor is unavailable."));
+			return ExecutionResult;
+		}
+
+		UWorld* EditorWorld = GEditor->GetEditorWorldContext().World();
+		if (EditorWorld == nullptr)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("editor_world_unavailable"), TEXT("No editable level is currently available."));
+			return ExecutionResult;
+		}
+
+		const TArray<FString> ActorReferences = GetStringArrayField(SelectionObject, TEXT("actor_references"));
+		const FString Query = GetScalarFieldAsString(SelectionObject, TEXT("query")).TrimStartAndEnd();
+		const FString ClassContains = GetScalarFieldAsString(SelectionObject, TEXT("class_contains")).TrimStartAndEnd();
+		const FString Tag = GetScalarFieldAsString(SelectionObject, TEXT("tag")).TrimStartAndEnd();
+		FString SourceFolderPath = GetScalarFieldAsString(SelectionObject, TEXT("folder_path")).TrimStartAndEnd();
+		SourceFolderPath.ReplaceInline(TEXT("\\"), TEXT("/"));
+		SourceFolderPath.RemoveFromStart(TEXT("/"));
+		SourceFolderPath.RemoveFromEnd(TEXT("/"));
+		int32 MaxCount = 20;
+		TryGetIntegerField(SelectionObject, TEXT("max_count"), MaxCount);
+		MaxCount = FMath::Clamp(MaxCount, 1, 50);
+
+		TArray<AActor*> MatchedActors;
+		TSet<AActor*> SeenActors;
+		for (const FString& ActorReference : ActorReferences)
+		{
+			AActor* Actor = FindActorByReference(EditorWorld, ActorReference);
+			if (Actor == nullptr)
+			{
+				ExecutionResult.ExecutionState = TEXT("blocked");
+				AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("actor_not_found"), ActorReference);
+				return ExecutionResult;
+			}
+			if (!SeenActors.Contains(Actor))
+			{
+				SeenActors.Add(Actor);
+				MatchedActors.Add(Actor);
+			}
+		}
+
+		const bool bHasFilter = !Query.IsEmpty() || !ClassContains.IsEmpty() || !Tag.IsEmpty() || !SourceFolderPath.IsEmpty();
+		if (bHasFilter)
+		{
+			for (ULevel* Level : EditorWorld->GetLevels())
+			{
+				if (Level == nullptr)
+				{
+					continue;
+				}
+				for (AActor* Actor : Level->Actors)
+				{
+					if (!ActorMatchesSelectionFilter(Actor, Query, ClassContains, Tag, SourceFolderPath))
+					{
+						continue;
+					}
+					if (!SeenActors.Contains(Actor))
+					{
+						SeenActors.Add(Actor);
+						MatchedActors.Add(Actor);
+					}
+					if (MatchedActors.Num() >= MaxCount)
+					{
+						break;
+					}
+				}
+				if (MatchedActors.Num() >= MaxCount)
+				{
+					break;
+				}
+			}
+		}
+
+		if (MatchedActors.Num() == 0)
+		{
+			ExecutionResult.ExecutionState = TEXT("blocked");
+			AddEditorOperationError(ExecutionResult.ErrorValues, TEXT("no_actors_matched_selection"), TEXT("No Level Actors matched the folder update criteria."));
+			return ExecutionResult;
+		}
+
+		const FScopedTransaction Transaction(FText::FromString(TEXT("UE Agent Set Actor Folder")));
+		TSet<FString> DirtyPackageNames;
+		for (AActor* Actor : MatchedActors)
+		{
+			if (Actor == nullptr)
+			{
+				continue;
+			}
+			Actor->SetFlags(RF_Transactional);
+			Actor->Modify();
+			if (ULevel* ActorLevel = Actor->GetLevel())
+			{
+				ActorLevel->Modify();
+			}
+			Actor->SetFolderPath(FName(*TargetFolderPath));
+			Actor->PostEditChange();
+			if (ULevel* ActorLevel = Actor->GetLevel())
+			{
+				ActorLevel->MarkPackageDirty();
+				if (ActorLevel->GetOutermost() != nullptr)
+				{
+					DirtyPackageNames.Add(ActorLevel->GetOutermost()->GetName());
+				}
+			}
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("updated_actors"), Actor->GetActorLabel());
+		}
+
+		ExecutionResult.bSuccess = true;
+		ExecutionResult.ExecutionState = TEXT("completed");
+		ExecutionResult.TransactionId = FString::Printf(TEXT("ue_transaction_%s"), *ProposalId);
+		ExecutionResult.UndoHint = TEXT("Use editor Undo to restore Actor folder paths. The level is marked dirty but not auto-saved.");
+		ExecutionResult.ResultObject->SetNumberField(TEXT("updated_actor_count"), MatchedActors.Num());
+		ExecutionResult.ResultObject->SetStringField(TEXT("target_folder_path"), TargetFolderPath);
+		ExecutionResult.ResultObject->SetStringField(TEXT("save_policy"), TEXT("mark_dirty_only"));
+		ExecutionResult.ResultObject->SetBoolField(TEXT("dirty"), true);
+		ExecutionResult.ResultObject->SetBoolField(TEXT("level_dirty"), true);
+		if (!Query.IsEmpty())
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("query"), Query);
+		}
+		if (!ClassContains.IsEmpty())
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("class_contains"), ClassContains);
+		}
+		if (!Tag.IsEmpty())
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("tag"), Tag);
+		}
+		if (!SourceFolderPath.IsEmpty())
+		{
+			SetAppliedField(ExecutionResult.ResultObject, TEXT("source_folder_path"), SourceFolderPath);
+		}
+		SetAppliedField(ExecutionResult.ResultObject, TEXT("target_folder_path"), TargetFolderPath);
+		for (const FString& DirtyPackageName : DirtyPackageNames)
+		{
+			AddResultStringArrayItem(ExecutionResult.ResultObject, TEXT("dirty_packages"), DirtyPackageName);
+		}
+		return ExecutionResult;
+	}
+
 	static FEditorOperationExecutionResult ExecuteSetActorTransform(const TSharedPtr<FJsonObject>& PayloadObject, const FString& ProposalId)
 	{
 		FEditorOperationExecutionResult ExecutionResult;
@@ -6395,6 +6555,11 @@ namespace UEAgentRootPanelPrivate
 		if (Definition.OperationType.Equals(TEXT("select_level_actors"), ESearchCase::IgnoreCase))
 		{
 			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSelectLevelActors);
+			return true;
+		}
+		if (Definition.OperationType.Equals(TEXT("set_actor_folder"), ESearchCase::IgnoreCase))
+		{
+			Definition.Executor = FUEAgentEditorToolExecutor::CreateStatic(&ExecuteSetActorFolder);
 			return true;
 		}
 		if (Definition.OperationType.Equals(TEXT("set_actor_metadata"), ESearchCase::IgnoreCase))
