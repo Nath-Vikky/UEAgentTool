@@ -2,6 +2,18 @@
 
 更新时间：2026-05-06
 
+
+## User / Debug 双视图工作区
+
+新版面板仍然保留 `User` 和 `Debug` 两个可切换视图，但默认使用 `User` 作为主工作区。
+
+- 顶部栏集中显示后端连接状态、Runtime Profile、当前功能、输出语言和 `User / Debug / Settings` 切换。
+- `User Workspace` 是日常使用入口，包含当前功能表单、聊天/结果展示、`Sync Inventory` 和 `Tool Catalog` 快捷按钮。
+- `Sync Inventory` 用于手动刷新当前 UE 项目的资产、代码、蓝图、UMG、材质和关卡上下文；打开面板后仍会自动同步一次。
+- `Tool Catalog` 用于查看后端/插件当前可用的编辑器操作能力，不会直接执行写操作。
+- `Debug Bench` 只用于联调、Trace、Raw JSON、Projection、Monitor 和任务列表排查；普通使用时不需要频繁进入。
+- 写操作仍然必须经过 Proposal 卡片确认，UI 美化不改变安全链路。
+
 ## 打开面板
 
 在 Unreal Editor 中打开 UEAgentTool 面板后，先确认底部状态栏显示后端在线。如果后端地址不正确，展开 Settings，修改 Backend Base URL 后点击应用。
