@@ -6683,6 +6683,9 @@ void SAgentRootPanel::Construct(const FArguments& InArgs)
 	check(HttpClient.IsValid());
 	check(ContextCollector.IsValid());
 
+	// Always open the panel in the user-facing workspace; Debug remains an explicit opt-in view.
+	StateStore->SetActiveViewMode(EUEAgentViewMode::User);
+
 	for (const EUEAgentFunctionType FunctionType : UEAgent::GetOrderedFunctions())
 	{
 		FunctionOptions.Add(MakeShared<EUEAgentFunctionType>(FunctionType));
@@ -6700,63 +6703,74 @@ void SAgentRootPanel::Construct(const FArguments& InArgs)
 	[
 		SNew(SBorder)
 		.Padding(8.0f)
-		.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+		.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+		.BorderBackgroundColor(UEAgentRootPanelPrivate::ShellBackgroundColor())
 		[
-			SNew(SVerticalBox)
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(0.0f, 0.0f, 0.0f, 8.0f)
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
 			[
-				BuildTopShell()
-			]
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			[
-				SAssignNew(SettingsPanelBox, SBox)
+				SNew(SBox)
+				.WidthOverride(312.0f)
 				[
-					StateStore->IsSettingsExpanded() ? BuildSettingsPanel() : SNullWidget::NullWidget
+					BuildTopShell()
 				]
 			]
-			+ SVerticalBox::Slot()
-			.FillHeight(1.0f)
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			.Padding(10.0f, 0.0f, 0.0f, 0.0f)
 			[
-				SNew(SWidgetSwitcher)
-				.WidgetIndex_Lambda([this]() -> int32
-				{
-					return StateStore->GetActiveViewMode() == EUEAgentViewMode::User ? 0 : 1;
-				})
-				+ SWidgetSwitcher::Slot()
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
 				[
-					BuildUserWorkspace()
-				]
-				+ SWidgetSwitcher::Slot()
-				[
-					BuildDebugWorkspace()
-				]
-			]
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(0.0f, 8.0f, 0.0f, 0.0f)
-			[
-				SNew(SBorder)
-				.BorderImage(FAppStyle::GetBrush("DetailsView.CategoryTop"))
-				.Padding(FMargin(8.0f, 6.0f))
-				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot()
-					.FillWidth(1.0f)
+					SAssignNew(SettingsPanelBox, SBox)
 					[
-						SNew(STextBlock)
-						.Text_Lambda([this]() { return FText::FromString(StateStore->GetStatusMessage()); })
-						.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+						StateStore->IsSettingsExpanded() ? BuildSettingsPanel() : SNullWidget::NullWidget
 					]
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.VAlign(VAlign_Center)
+				]
+				+ SVerticalBox::Slot()
+				.FillHeight(1.0f)
+				.Padding(0.0f, 0.0f, 0.0f, 8.0f)
+				[
+					SNew(SWidgetSwitcher)
+					.WidgetIndex_Lambda([this]() -> int32
+					{
+						return StateStore->GetActiveViewMode() == EUEAgentViewMode::User ? 0 : 1;
+					})
+					+ SWidgetSwitcher::Slot()
 					[
-						SNew(SProgressBar)
-						.Visibility_Lambda([this]() -> EVisibility { return StateStore->IsBusy() ? EVisibility::Visible : EVisibility::Collapsed; })
-						.Percent(TOptional<float>())
+						BuildUserWorkspace()
+					]
+					+ SWidgetSwitcher::Slot()
+					[
+						BuildDebugWorkspace()
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(SBorder)
+					.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+					.BorderBackgroundColor(UEAgentRootPanelPrivate::PanelBackgroundColor())
+					.Padding(FMargin(10.0f, 6.0f))
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.FillWidth(1.0f)
+						[
+							SNew(STextBlock)
+							.Text_Lambda([this]() { return FText::FromString(StateStore->GetStatusMessage()); })
+							.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.VAlign(VAlign_Center)
+						[
+							SNew(SProgressBar)
+							.Visibility_Lambda([this]() -> EVisibility { return StateStore->IsBusy() ? EVisibility::Visible : EVisibility::Collapsed; })
+							.Percent(TOptional<float>())
+						]
 					]
 				]
 			]
@@ -6795,9 +6809,15 @@ void SAgentRootPanel::HandleStateChanged()
 	if (ChatListView.IsValid())
 	{
 		ChatListView->RequestListRefresh();
-		if (ChatItems.Num() > 0)
+		const int32 ChatItemCount = ChatItems.Num();
+		if (ChatItemCount < LastAutoScrolledChatCount)
+		{
+			LastAutoScrolledChatCount = ChatItemCount;
+		}
+		if (ChatItemCount > LastAutoScrolledChatCount && ChatItemCount > 0)
 		{
 			ChatListView->RequestScrollIntoView(ChatItems.Last());
+			LastAutoScrolledChatCount = ChatItemCount;
 		}
 	}
 
@@ -8325,10 +8345,10 @@ TSharedRef<SWidget> SAgentRootPanel::BuildTopShell()
 	return SNew(SBorder)
 		.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
 		.BorderBackgroundColor(UEAgentRootPanelPrivate::PanelBackgroundColor())
-		.Padding(FMargin(14.0f, 12.0f))
+		.Padding(FMargin(12.0f, 12.0f))
 		[
 			SNew(SVerticalBox)
-			+ SVerticalBox::Slot().AutoHeight()
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 12.0f)
 			[
 				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
@@ -8336,13 +8356,13 @@ TSharedRef<SWidget> SAgentRootPanel::BuildTopShell()
 					SNew(SBorder)
 					.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
 					.BorderBackgroundColor(FLinearColor(0.07f, 0.11f, 0.16f, 1.0f))
-					.Padding(6.0f)
+					.Padding(5.0f)
 					[
 						SNew(SImage)
 						.Image(FUEAgentToolStyle::Get().GetBrush("UEAgentTool.LargeIcon"))
 					]
 				]
-				+ SHorizontalBox::Slot().AutoWidth().Padding(12.0f, 0.0f, 16.0f, 0.0f).VAlign(VAlign_Center)
+				+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(10.0f, 0.0f, 0.0f, 0.0f).VAlign(VAlign_Center)
 				[
 					SNew(SVerticalBox)
 					+ SVerticalBox::Slot().AutoHeight()
@@ -8354,61 +8374,77 @@ TSharedRef<SWidget> SAgentRootPanel::BuildTopShell()
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
 					[
 						SNew(STextBlock)
-						.Text(FText::FromString(TEXT("Editor Agent workspace")))
+						.Text(FText::FromString(TEXT("Editor Agent")))
 						.ColorAndOpacity(FSlateColor::UseSubduedForeground())
 					]
 				]
-				+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 8.0f, 0.0f).VAlign(VAlign_Center)
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 10.0f)
+			[
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(this, &SAgentRootPanel::GetBackendStatusColor)
+				.Padding(FMargin(10.0f, 6.0f))
 				[
-					SNew(SBorder)
-					.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-					.BorderBackgroundColor(this, &SAgentRootPanel::GetBackendStatusColor)
-					.Padding(FMargin(10.0f, 5.0f))
-					[
-						SNew(STextBlock)
-						.Text(this, &SAgentRootPanel::GetBackendStatusLabel)
-						.Font(FAppStyle::GetFontStyle("SmallFont"))
-					]
+					SNew(STextBlock)
+					.Text(this, &SAgentRootPanel::GetBackendStatusLabel)
+					.Font(FAppStyle::GetFontStyle("SmallFont"))
 				]
-				+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 8.0f, 0.0f).VAlign(VAlign_Center)
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 8.0f)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Runtime Profile")))
+				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 10.0f)
+			[
+				SAssignNew(RuntimeProfileComboBox, SComboBox<TSharedPtr<FUEAgentRuntimeProfile>>)
+				.OptionsSource(&RuntimeProfileOptions)
+				.OnGenerateWidget_Lambda([](const TSharedPtr<FUEAgentRuntimeProfile>& Profile)
+				{
+					return SNew(STextBlock).Text(Profile.IsValid() ? FText::FromString(Profile->Label) : FText::FromString(TEXT("Profile")));
+				})
+				.OnSelectionChanged(this, &SAgentRootPanel::OnProfileSelectionChanged)
+				.InitiallySelectedItem(FindRuntimeProfileOption(StateStore->GetActiveProfileId()))
 				[
-					SAssignNew(RuntimeProfileComboBox, SComboBox<TSharedPtr<FUEAgentRuntimeProfile>>)
-					.OptionsSource(&RuntimeProfileOptions)
-					.OnGenerateWidget_Lambda([](const TSharedPtr<FUEAgentRuntimeProfile>& Profile)
-					{
-						return SNew(STextBlock).Text(Profile.IsValid() ? FText::FromString(Profile->Label) : FText::FromString(TEXT("Profile")));
-					})
-					.OnSelectionChanged(this, &SAgentRootPanel::OnProfileSelectionChanged)
-					.InitiallySelectedItem(FindRuntimeProfileOption(StateStore->GetActiveProfileId()))
-					[
-						SNew(STextBlock)
-						.Text(this, &SAgentRootPanel::GetProfileComboLabel)
-					]
+					SNew(STextBlock)
+					.Text(this, &SAgentRootPanel::GetProfileComboLabel)
 				]
-				+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0.0f, 0.0f, 12.0f, 0.0f).VAlign(VAlign_Center)
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 8.0f)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Function")))
+				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 12.0f)
+			[
+				SAssignNew(FunctionComboBox, SComboBox<TSharedPtr<EUEAgentFunctionType>>)
+				.OptionsSource(&FunctionOptions)
+				.OnGenerateWidget_Lambda([](const TSharedPtr<EUEAgentFunctionType>& Option)
+				{
+					return SNew(STextBlock).Text(Option.IsValid() ? UEAgent::ToFunctionLabel(*Option) : FText::GetEmpty());
+				})
+				.OnSelectionChanged(this, &SAgentRootPanel::OnFunctionSelectionChanged)
+				.InitiallySelectedItem(FindFunctionOption(StateStore->GetActiveFunction()))
 				[
-					SAssignNew(FunctionComboBox, SComboBox<TSharedPtr<EUEAgentFunctionType>>)
-					.OptionsSource(&FunctionOptions)
-					.OnGenerateWidget_Lambda([](const TSharedPtr<EUEAgentFunctionType>& Option)
-					{
-						return SNew(STextBlock).Text(Option.IsValid() ? UEAgent::ToFunctionLabel(*Option) : FText::GetEmpty());
-					})
-					.OnSelectionChanged(this, &SAgentRootPanel::OnFunctionSelectionChanged)
-					.InitiallySelectedItem(FindFunctionOption(StateStore->GetActiveFunction()))
-					[
-						SNew(STextBlock)
-						.Text(this, &SAgentRootPanel::GetFunctionComboLabel)
-					]
+					SNew(STextBlock)
+					.Text(this, &SAgentRootPanel::GetFunctionComboLabel)
 				]
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 12.0f)
+			[
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(UEAgentRootPanelPrivate::SubtlePanelColor())
+				.Padding(6.0f)
 				[
-					SNew(SBorder)
-					.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-					.BorderBackgroundColor(UEAgentRootPanelPrivate::SubtlePanelColor())
-					.Padding(4.0f)
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 6.0f)
 					[
 						SNew(SHorizontalBox)
-						+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 4.0f, 0.0f)
+						+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0.0f, 0.0f, 4.0f, 0.0f)
 						[
 							SNew(SButton)
 							.Text(FText::FromString(TEXT("ZH")))
@@ -8418,7 +8454,7 @@ TSharedRef<SWidget> SAgentRootPanel::BuildTopShell()
 							})
 							.OnClicked_Lambda([this]() { SetPreferredOutputLanguage(TEXT("zh-CN")); return FReply::Handled(); })
 						]
-						+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 8.0f, 0.0f)
+						+ SHorizontalBox::Slot().FillWidth(1.0f)
 						[
 							SNew(SButton)
 							.Text(FText::FromString(TEXT("EN")))
@@ -8428,7 +8464,11 @@ TSharedRef<SWidget> SAgentRootPanel::BuildTopShell()
 							})
 							.OnClicked_Lambda([this]() { SetPreferredOutputLanguage(TEXT("en-US")); return FReply::Handled(); })
 						]
-						+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 4.0f, 0.0f)
+					]
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0.0f, 0.0f, 4.0f, 0.0f)
 						[
 							SNew(SButton)
 							.Text(FText::FromString(TEXT("User")))
@@ -8438,7 +8478,7 @@ TSharedRef<SWidget> SAgentRootPanel::BuildTopShell()
 							})
 							.OnClicked_Lambda([this]() { StateStore->SetActiveViewMode(EUEAgentViewMode::User); return FReply::Handled(); })
 						]
-						+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 4.0f, 0.0f)
+						+ SHorizontalBox::Slot().FillWidth(1.0f)
 						[
 							SNew(SButton)
 							.Text(FText::FromString(TEXT("Debug")))
@@ -8448,18 +8488,69 @@ TSharedRef<SWidget> SAgentRootPanel::BuildTopShell()
 							})
 							.OnClicked_Lambda([this]() { StateStore->SetActiveViewMode(EUEAgentViewMode::Debug); return FReply::Handled(); })
 						]
-						+ SHorizontalBox::Slot().AutoWidth()
-						[
-							SNew(SButton)
-							.Text(FText::FromString(TEXT("Settings")))
-							.OnClicked_Lambda([this]() { StateStore->SetSettingsExpanded(!StateStore->IsSettingsExpanded()); return FReply::Handled(); })
-						]
 					]
 				]
 			]
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 10.0f, 0.0f, 0.0f)
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 8.0f)
 			[
-				BuildContextChips()
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Actions")))
+				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 12.0f)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 6.0f)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Sync Inventory")))
+					.OnClicked_Lambda([this]() { SubmitProjectInventorySnapshot(); return FReply::Handled(); })
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 6.0f)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Tool Catalog")))
+					.OnClicked_Lambda([this]() { ShowEditorOperationCapabilities(); return FReply::Handled(); })
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Settings")))
+					.OnClicked_Lambda([this]() { StateStore->SetSettingsExpanded(!StateStore->IsSettingsExpanded()); return FReply::Handled(); })
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 12.0f)
+			[
+				SAssignNew(ResultCardsBox, SBox)
+				.Visibility_Lambda([this]()
+				{
+					const FUEAgentResultSnapshot& Result = StateStore->GetLastResult();
+					const bool bHasHighlights = Result.Blocks.Num() > 0 || Result.Citations.Num() > 0 || Result.QuickActions.Num() > 0 || Result.Proposals.Num() > 0;
+					return bHasHighlights ? EVisibility::Visible : EVisibility::Collapsed;
+				})
+				[
+					BuildResultHighlightsSummary()
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 8.0f)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Context")))
+				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+			]
+			+ SVerticalBox::Slot().FillHeight(1.0f)
+			[
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(UEAgentRootPanelPrivate::SubtlePanelColor())
+				.Padding(8.0f)
+				[
+					SNew(SScrollBox)
+					+ SScrollBox::Slot()
+					[
+						BuildContextChips()
+					]
+				]
 			]
 		];
 }
@@ -8765,53 +8856,14 @@ TSharedRef<SWidget> SAgentRootPanel::BuildUserWorkspace()
 		.Padding(10.0f)
 		[
 			SNew(SVerticalBox)
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 10.0f)
-			[
-				SNew(SBorder)
-				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-				.BorderBackgroundColor(UEAgentRootPanelPrivate::RaisedPanelColor())
-				.Padding(FMargin(12.0f, 10.0f))
-				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().FillWidth(1.0f)
-					[
-						SNew(SVerticalBox)
-						+ SVerticalBox::Slot().AutoHeight()
-						[
-							SNew(STextBlock)
-							.Text(FText::FromString(TEXT("User Workspace")))
-							.Font(FAppStyle::GetFontStyle("HeadingExtraSmall"))
-						]
-						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)
-						[
-							SNew(STextBlock)
-							.Text(FText::FromString(TEXT("Ask questions, inspect context, generate drafts, and review safe editor proposals.")))
-							.ColorAndOpacity(FSlateColor::UseSubduedForeground())
-							.AutoWrapText(true)
-						]
-					]
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.0f, 0.0f, 0.0f, 0.0f)
-					[
-						SNew(SButton)
-						.Text(FText::FromString(TEXT("Sync Inventory")))
-						.OnClicked_Lambda([this]() { SubmitProjectInventorySnapshot(); return FReply::Handled(); })
-					]
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.0f, 0.0f, 0.0f, 0.0f)
-					[
-						SNew(SButton)
-						.Text(FText::FromString(TEXT("Tool Catalog")))
-						.OnClicked_Lambda([this]() { ShowEditorOperationCapabilities(); return FReply::Handled(); })
-					]
-				]
-			]
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 10.0f)
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 8.0f)
 			[
 				SAssignNew(ParameterPanelBox, SBox)
 				[
 					BuildFunctionParameterPanel()
 				]
 			]
-			+ SVerticalBox::Slot().FillHeight(1.0f).Padding(0.0f, 0.0f, 0.0f, 10.0f)
+			+ SVerticalBox::Slot().FillHeight(1.0f).Padding(0.0f, 0.0f, 0.0f, 8.0f)
 			[
 				SNew(SBorder)
 				.Visibility_Lambda([this]() { return UEAgent::UsesUnifiedChat(StateStore->GetActiveFunction()) ? EVisibility::Visible : EVisibility::Collapsed; })
@@ -8819,17 +8871,18 @@ TSharedRef<SWidget> SAgentRootPanel::BuildUserWorkspace()
 				.BorderBackgroundColor(UEAgentRootPanelPrivate::SubtlePanelColor())
 				.Padding(8.0f)
 				[
-					SAssignNew(ChatListView, SListView<TSharedPtr<FUEAgentChatMessage>>)
-					.ListItemsSource(&ChatItems)
-					.SelectionMode(ESelectionMode::None)
-					.OnGenerateRow(this, &SAgentRootPanel::OnGenerateChatRow)
-				]
-			]
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 10.0f)
-			[
-				SAssignNew(ResultCardsBox, SBox)
-				[
-					BuildResultHighlightsSummary()
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(1.0f)
+					[
+						SAssignNew(ChatListView, SListView<TSharedPtr<FUEAgentChatMessage>>)
+						.ListItemsSource(&ChatItems)
+						.SelectionMode(ESelectionMode::None)
+						.OnGenerateRow(this, &SAgentRootPanel::OnGenerateChatRow)
+					]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(5.0f, 3.0f, 0.0f, 3.0f)
+					[
+						BuildChatScrollIndicator()
+					]
 				]
 			]
 			+ SVerticalBox::Slot().AutoHeight()
@@ -8870,6 +8923,45 @@ TSharedRef<SWidget> SAgentRootPanel::BuildUserWorkspace()
 		];
 }
 
+TSharedRef<SWidget> SAgentRootPanel::BuildChatScrollIndicator() const
+{
+	return SNew(SBox)
+		.WidthOverride(5.0f)
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+			.BorderBackgroundColor(FLinearColor(0.05f, 0.06f, 0.075f, 0.45f))
+			.Padding(FMargin(1.0f, 4.0f))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().FillHeight(1.0f)
+				[
+					SNew(SSpacer)
+				]
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+				[
+					SNew(SBox)
+					.WidthOverride(3.0f)
+					.HeightOverride_Lambda([this]() -> FOptionalSize
+					{
+						const float MessageCount = static_cast<float>(FMath::Max(ChatItems.Num(), 1));
+						const float Density = FMath::Clamp((MessageCount - 1.0f) / 28.0f, 0.0f, 1.0f);
+						return FOptionalSize(FMath::Lerp(76.0f, 28.0f, Density));
+					})
+					[
+						SNew(SBorder)
+						.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+						.BorderBackgroundColor_Lambda([this]()
+						{
+							return ChatItems.Num() > 0
+								? FLinearColor(0.12f, 0.58f, 0.84f, 0.72f)
+								: FLinearColor(0.20f, 0.23f, 0.27f, 0.55f);
+						})
+					]
+				]
+			]
+		];
+}
 TSharedRef<SWidget> SAgentRootPanel::BuildDebugWorkspace()
 {
 	return SNew(SBorder)
@@ -9047,51 +9139,65 @@ TSharedRef<SWidget> SAgentRootPanel::BuildResultHighlightsSummary()
 
 	const FString UiLanguage = StateStore->GetEffectiveOutputLanguage();
 	const FString Title = Result.UserTitle.IsEmpty() ? TEXT("Latest Result") : Result.UserTitle;
-	const FString MetaText = FString::Printf(TEXT("Blocks %d   Citations %d   Actions %d   Proposals %d   Status %s"),
+	const FString MetaText = FString::Printf(TEXT("Blocks %d | Citations %d | Actions %d | Proposals %d\nStatus %s"),
 		Result.Blocks.Num(), Result.Citations.Num(), Result.QuickActions.Num(), Result.Proposals.Num(), *UEAgentRootPanelPrivate::LocalizeStatusLabel(Result.TaskStatus, UiLanguage));
 
 	return SNew(SBorder)
 		.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
 		.BorderBackgroundColor(UEAgentRootPanelPrivate::RaisedPanelColor())
-		.Padding(FMargin(12.0f, 10.0f))
+		.Padding(FMargin(10.0f, 9.0f))
 		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 10.0f, 0.0f)
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()
 			[
-				SNew(SBorder)
-				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-				.BorderBackgroundColor(UEAgentRootPanelPrivate::AgentAccentColor())
-				.Padding(FMargin(4.0f, 22.0f))
-			]
-			+ SHorizontalBox::Slot().FillWidth(1.0f)
-			[
-				SNew(SVerticalBox)
-				+ SVerticalBox::Slot().AutoHeight()
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 8.0f, 0.0f)
 				[
-					SNew(STextBlock)
-					.Text(FText::FromString(Title))
-					.Font(FAppStyle::GetFontStyle("HeadingExtraSmall"))
-					.AutoWrapText(true)
+					SNew(SBorder)
+					.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+					.BorderBackgroundColor(UEAgentRootPanelPrivate::AgentAccentColor())
+					.Padding(FMargin(3.0f, 18.0f))
 				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)
+				+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
 				[
-					SNew(STextBlock)
-					.Text(FText::FromString(MetaText))
-					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
-					.AutoWrapText(true)
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(TEXT("Latest Result")))
+						.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(Title))
+						.Font(FAppStyle::GetFontStyle("HeadingExtraSmall"))
+						.AutoWrapText(true)
+					]
 				]
 			]
-			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.0f, 0.0f, 0.0f, 0.0f)
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 7.0f, 0.0f, 8.0f)
 			[
-				SNew(SButton)
-				.Text(FText::FromString(TEXT("Open Highlights")))
-				.OnClicked_Lambda([this]() { OpenHighlightsWindow(); return FReply::Handled(); })
+				SNew(STextBlock)
+				.Text(FText::FromString(MetaText))
+				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+				.AutoWrapText(true)
 			]
-			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.0f, 0.0f, 0.0f, 0.0f)
+			+ SVerticalBox::Slot().AutoHeight()
 			[
-				SNew(SButton)
-				.Text(FText::FromString(TEXT("Debug View")))
-				.OnClicked_Lambda([this]() { StateStore->SetActiveViewMode(EUEAgentViewMode::Debug); return FReply::Handled(); })
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0.0f, 0.0f, 5.0f, 0.0f)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Open")))
+					.OnClicked_Lambda([this]() { OpenHighlightsWindow(); return FReply::Handled(); })
+				]
+				+ SHorizontalBox::Slot().FillWidth(1.0f)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Debug")))
+					.OnClicked_Lambda([this]() { StateStore->SetActiveViewMode(EUEAgentViewMode::Debug); return FReply::Handled(); })
+				]
 			]
 		];
 }

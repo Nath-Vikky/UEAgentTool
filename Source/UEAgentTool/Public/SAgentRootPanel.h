@@ -73,6 +73,7 @@ private:
 	TSharedRef<SWidget> BuildUserResultCards();
 	TSharedRef<SWidget> BuildUserBlockCard(const FUEAgentUserViewBlock& Block) const;
 	TSharedRef<SWidget> BuildGeneratedItemsDrafts(const FUEAgentUserViewBlock& Block, const FString& UiLanguage) const;
+	TSharedRef<SWidget> BuildChatScrollIndicator() const;
 	TSharedRef<SWidget> BuildContextChips() const;
 	TSharedRef<SWidget> BuildChatBubble(const TSharedPtr<FUEAgentChatMessage>& Message) const;
 	TSharedRef<SWidget> BuildDebugSectionBody();
@@ -121,4 +122,5 @@ private:
 	TSharedPtr<class SMultiLineEditableTextBox> ChatInputBox;
 	TSharedPtr<class SEditableTextBox> BaseUrlTextBox;
 	bool bAutoInventorySubmitted = false;
+	int32 LastAutoScrolledChatCount = 0;
 };

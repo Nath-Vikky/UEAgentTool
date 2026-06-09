@@ -5,13 +5,15 @@
 
 ## User / Debug 双视图工作区
 
-新版面板仍然保留 `User` 和 `Debug` 两个可切换视图，但默认使用 `User` 作为主工作区。
+新版面板仍然保留 `User` 和 `Debug` 两个可切换视图；每次打开面板默认进入 `User` 主工作区，`Debug` 需要用户主动切换。
 
-- 顶部栏集中显示后端连接状态、Runtime Profile、当前功能、输出语言和 `User / Debug / Settings` 切换。
-- `User Workspace` 是日常使用入口，包含当前功能表单、聊天/结果展示、`Sync Inventory` 和 `Tool Catalog` 快捷按钮。
+- 左侧工作栏集中显示后端连接状态、Runtime Profile、当前功能、输出语言、`User / Debug` 切换、常用动作、最新结果摘要和当前上下文。
+- 右侧主舞台用于功能表单、聊天列表和输入框；最新结果摘要放在左侧，避免聊天区被顶部按钮、上下文信息和结果卡片挤压。
 - `Sync Inventory` 用于手动刷新当前 UE 项目的资产、代码、蓝图、UMG、材质和关卡上下文；打开面板后仍会自动同步一次。
 - `Tool Catalog` 用于查看后端/插件当前可用的编辑器操作能力，不会直接执行写操作。
 - `Debug Bench` 只用于联调、Trace、Raw JSON、Projection、Monitor 和任务列表排查；普通使用时不需要频繁进入。
+- 聊天列表只在新增消息时自动滚动，避免状态刷新导致滚动条抖动。
+- 聊天区右侧使用动态滚动提示条：初始较短，消息越多会逐渐缩短到最小长度；实际滚动仍由聊天列表负责。
 - 写操作仍然必须经过 Proposal 卡片确认，UI 美化不改变安全链路。
 
 ## 打开面板
@@ -234,7 +236,7 @@ editor-operation Proposal.
 
 ## Highlights Window
 
-User View 不再直接把 summary、issues、recommendations 等高亮信息塞进主聊天区域。任务完成后，主面板只显示一条结果摘要，点击“打开高亮”可在独立窗口查看完整高亮内容。
+User View 不再直接把 summary、issues、recommendations 等高亮信息塞进主聊天区域。任务完成后，左侧工作栏会显示一条最新结果摘要，点击 `Open` 可在独立窗口查看完整高亮内容。
 
 Assets Inspect 的命名问题会优先显示 severity、reason 和 suggestion。
 
