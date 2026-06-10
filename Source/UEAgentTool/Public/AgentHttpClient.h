@@ -14,6 +14,7 @@ class FUEAgentHttpClient : public TSharedFromThis<FUEAgentHttpClient>
 public:
 	using FJsonResponseCallback = TFunction<void(bool, const FString&, const FString&, TSharedPtr<FJsonObject>)>;
 	using FTextResponseCallback = TFunction<void(bool, const FString&, const FString&)>;
+	using FStreamDeltaCallback = TFunction<void(const FString&)>;
 
 	explicit FUEAgentHttpClient(TSharedRef<FUEAgentStateStore> InStateStore);
 
@@ -25,10 +26,12 @@ public:
 	void RequestRuntimeProfiles(const FJsonResponseCallback& Callback) const;
 	void RequestSystemAlerts(const FJsonResponseCallback& Callback) const;
 	void RequestMetrics(const FTextResponseCallback& Callback) const;
+	void RequestSessions(const FString& ProjectName, int32 Limit, const FJsonResponseCallback& Callback) const;
 	void CreateSession(const FString& PreferredSessionId, const FJsonResponseCallback& Callback) const;
 	void RequestSessionSummary(const FString& SessionId, const FJsonResponseCallback& Callback) const;
 	void RequestSessionHistory(const FString& SessionId, const FJsonResponseCallback& Callback) const;
 	void RequestSessionTasks(const FString& SessionId, const FJsonResponseCallback& Callback) const;
+	void ArchiveSession(const FString& SessionId, const FJsonResponseCallback& Callback) const;
 	void ClearSession(const FString& SessionId, const FJsonResponseCallback& Callback) const;
 	void ActivateProfile(const FString& ProfileId, const FJsonResponseCallback& Callback) const;
 	void RequestRecentTasks(const FJsonResponseCallback& Callback) const;
@@ -79,6 +82,14 @@ public:
 		const FString& InputText,
 		EUEAgentViewMode ActiveView,
 		const FJsonResponseCallback& Callback) const;
+	void SubmitFunctionStream(
+		EUEAgentFunctionType FunctionType,
+		const FUEAgentContextSummary& Context,
+		const FUEAgentFunctionParameters& Parameters,
+		const FString& InputText,
+		EUEAgentViewMode ActiveView,
+		const FStreamDeltaCallback& DeltaCallback,
+		const FJsonResponseCallback& Callback) const;
 
 private:
 	TSharedPtr<FJsonObject> BuildRequestPayload(
@@ -86,10 +97,12 @@ private:
 		const FUEAgentContextSummary& Context,
 		const FUEAgentFunctionParameters& Parameters,
 		const FString& InputText,
-		EUEAgentViewMode ActiveView) const;
+		EUEAgentViewMode ActiveView,
+		bool bStream = false) const;
 
 	void SendRequest(const FString& Verb, const FString& RelativePath, const TSharedPtr<FJsonObject>& BodyObject, const FJsonResponseCallback& Callback) const;
 	void SendTextRequest(const FString& Verb, const FString& RelativePath, const FTextResponseCallback& Callback) const;
+	void SendStreamingRequest(const FString& RelativePath, const TSharedPtr<FJsonObject>& BodyObject, const FStreamDeltaCallback& DeltaCallback, const FJsonResponseCallback& Callback) const;
 	FString BuildUrl(const FString& RelativePath) const;
 
 private:

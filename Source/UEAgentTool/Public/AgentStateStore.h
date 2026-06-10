@@ -27,6 +27,10 @@ public:
 
 	void SetSettingsExpanded(bool bExpanded);
 	bool IsSettingsExpanded() const;
+	void SetStreamingEnabled(bool bEnabled, bool bBroadcast = true);
+	bool IsStreamingEnabled() const;
+	void SetSessionRailExpanded(bool bExpanded, bool bBroadcast = true);
+	bool IsSessionRailExpanded() const;
 
 	void SetBackendBaseUrl(const FString& InBaseUrl);
 	const FString& GetBackendBaseUrl() const;
@@ -44,6 +48,7 @@ public:
 	const FString& GetSessionId() const;
 	FString GetShortSessionId() const;
 	void SetSessionId(const FString& InSessionId, bool bBroadcast = true);
+	void SwitchToSession(const FString& InSessionId);
 	bool IsSessionSynchronized() const;
 	const FString& GetSessionStatusText() const;
 
@@ -60,6 +65,11 @@ public:
 	void AppendUserMessage(const FString& InText, EUEAgentFunctionType FunctionType);
 	void AppendAssistantMessage(const FString& InTitle, const FString& InText, const FString& InStatusHint, const FString& InTaskId = FString(), const FString& InFunctionId = FString());
 	void AppendSystemMessage(const FString& InText, const FString& InTitle = TEXT("System"));
+	void BeginStreamingAssistantMessage(EUEAgentFunctionType FunctionType);
+	void AppendStreamingAssistantDelta(const FString& DeltaText);
+	void DiscardStreamingAssistantMessage();
+	bool HasStreamingAssistantMessage() const;
+	void FinalizeStreamingAssistantMessage(const FString& InTitle, const FString& InText, const FString& InStatusHint, const FString& InTaskId, const FString& InFunctionId, bool bIncomplete);
 	const TArray<TSharedPtr<FUEAgentChatMessage>>& GetChatMessages() const;
 
 	void SetLastRequestJson(const FString& InJson);
@@ -79,6 +89,7 @@ public:
 	void ApplyRuntimeProfilesResponse(const TSharedPtr<FJsonObject>& ResponseObject);
 	void ApplyRecentTasksResponse(const TSharedPtr<FJsonObject>& ResponseObject);
 	void ApplyProposalListResponse(const TSharedPtr<FJsonObject>& ResponseObject);
+	void ApplySessionListResponse(const TSharedPtr<FJsonObject>& ResponseObject);
 	void ApplySessionSummaryResponse(const TSharedPtr<FJsonObject>& ResponseObject);
 	void ApplySessionHistoryResponse(const TSharedPtr<FJsonObject>& ResponseObject);
 	void ApplySessionTasksResponse(const TSharedPtr<FJsonObject>& ResponseObject);
@@ -96,6 +107,7 @@ public:
 
 	const TArray<TSharedPtr<FUEAgentTaskSummary>>& GetRecentTasks() const;
 	const TArray<TSharedPtr<FUEAgentProposalSummary>>& GetPendingProposals() const;
+	const TArray<TSharedPtr<FUEAgentSessionItem>>& GetSessionItems() const;
 	const TArray<TSharedPtr<FUEAgentCodeFileItem>>& GetCodeReviewFiles() const;
 	TArray<TSharedPtr<FUEAgentRuntimeProfile>>& GetRuntimeProfiles();
 	const FString& GetActiveProfileId() const;
@@ -118,6 +130,8 @@ private:
 	EUEAgentFunctionType ActiveFunction = EUEAgentFunctionType::AgentChat;
 	EUEAgentDebugSection ActiveDebugSection = EUEAgentDebugSection::Overview;
 	bool bSettingsExpanded = false;
+	bool bStreamingEnabled = false;
+	bool bSessionRailExpanded = false;
 	bool bBusy = false;
 	bool bBackendOnline = false;
 
@@ -145,6 +159,7 @@ private:
 	FUEAgentResultSnapshot LastResult;
 	TMap<EUEAgentFunctionType, FUEAgentFunctionParameters> ParameterDrafts;
 	TArray<TSharedPtr<FUEAgentChatMessage>> ChatMessages;
+	TArray<TSharedPtr<FUEAgentSessionItem>> SessionItems;
 	TArray<TSharedPtr<FUEAgentTaskSummary>> RecentTasks;
 	TArray<TSharedPtr<FUEAgentProposalSummary>> PendingProposals;
 	TArray<TSharedPtr<FUEAgentRuntimeProfile>> RuntimeProfiles;

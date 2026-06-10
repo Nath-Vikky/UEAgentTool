@@ -6,6 +6,7 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HttpModule.h"
+#include "Interfaces/IHttpRequest.h"
 #include "Interfaces/IHttpResponse.h"
 #include "GenericPlatform/GenericPlatformHttp.h"
 #include "Internationalization/Culture.h"
@@ -34,6 +35,121 @@ namespace UEAgentHttpClientPrivate
 		TSharedPtr<FJsonObject> JsonObject;
 		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Text);
 		return FJsonSerializer::Deserialize(Reader, JsonObject) ? JsonObject : nullptr;
+	}
+
+	static TSharedPtr<FJsonObject> GetObjectField(const TSharedPtr<FJsonObject>& JsonObject, const FString& FieldName)
+	{
+		if (!JsonObject.IsValid())
+		{
+			return nullptr;
+		}
+
+		const TSharedPtr<FJsonObject>* Result = nullptr;
+		return JsonObject->TryGetObjectField(FieldName, Result) && Result != nullptr ? *Result : nullptr;
+	}
+
+	static FString GetStringOrDefault(const TSharedPtr<FJsonObject>& JsonObject, const FString& FieldName, const FString& DefaultValue = FString())
+	{
+		if (!JsonObject.IsValid())
+		{
+			return DefaultValue;
+		}
+
+		FString Value;
+		return JsonObject->TryGetStringField(FieldName, Value) ? Value : DefaultValue;
+	}
+
+	static void ParseSseBlock(const FString& Block, FString& OutEventName, FString& OutDataText)
+	{
+		OutEventName = TEXT("message");
+		OutDataText.Reset();
+
+		TArray<FString> Lines;
+		Block.ParseIntoArrayLines(Lines, false);
+		TArray<FString> DataLines;
+		for (const FString& Line : Lines)
+		{
+			if (Line.StartsWith(TEXT("event:")))
+			{
+				OutEventName = Line.RightChop(6).TrimStartAndEnd();
+			}
+			else if (Line.StartsWith(TEXT("data:")))
+			{
+				DataLines.Add(Line.RightChop(5).TrimStartAndEnd());
+			}
+		}
+		OutDataText = FString::Join(DataLines, TEXT("\n"));
+	}
+
+	static void ProcessSseEvents(
+		const FString& ResponseText,
+		int32& ProcessedEventCount,
+		const TFunction<void(const FString&, const FString&)>& EventCallback)
+	{
+		FString Normalized = ResponseText.Replace(TEXT("\r\n"), TEXT("\n")).Replace(TEXT("\r"), TEXT("\n"));
+		TArray<FString> CompleteBlocks;
+		int32 SearchStart = 0;
+		while (SearchStart < Normalized.Len())
+		{
+			int32 SeparatorIndex = INDEX_NONE;
+			if (!Normalized.FindChar(TEXT('\n'), SeparatorIndex))
+			{
+				break;
+			}
+
+			SeparatorIndex = Normalized.Find(TEXT("\n\n"), ESearchCase::CaseSensitive, ESearchDir::FromStart, SearchStart);
+			if (SeparatorIndex == INDEX_NONE)
+			{
+				break;
+			}
+
+			const FString Block = Normalized.Mid(SearchStart, SeparatorIndex - SearchStart).TrimStartAndEnd();
+			if (!Block.IsEmpty())
+			{
+				CompleteBlocks.Add(Block);
+			}
+			SearchStart = SeparatorIndex + 2;
+		}
+
+		for (int32 Index = ProcessedEventCount; Index < CompleteBlocks.Num(); ++Index)
+		{
+			FString EventName;
+			FString DataText;
+			ParseSseBlock(CompleteBlocks[Index], EventName, DataText);
+			if (!DataText.IsEmpty())
+			{
+				EventCallback(EventName, DataText);
+			}
+		}
+		ProcessedEventCount = CompleteBlocks.Num();
+	}
+
+	static void HandleSseEvent(
+		const FString& EventName,
+		const FString& DataText,
+		const FUEAgentHttpClient::FStreamDeltaCallback& DeltaCallback,
+		const TSharedRef<FString>& FinalResponseText)
+	{
+		const TSharedPtr<FJsonObject> EventObject = ParseJsonObject(DataText);
+		const TSharedPtr<FJsonObject> PayloadObject = GetObjectField(EventObject, TEXT("payload"));
+		if (EventName.Equals(TEXT("assistant_delta"), ESearchCase::IgnoreCase))
+		{
+			const FString DeltaText = GetStringOrDefault(PayloadObject, TEXT("text"));
+			if (!DeltaText.IsEmpty())
+			{
+				DeltaCallback(DeltaText);
+			}
+			return;
+		}
+
+		if (EventName.Equals(TEXT("final"), ESearchCase::IgnoreCase))
+		{
+			const TSharedPtr<FJsonObject> ResponseObject = GetObjectField(PayloadObject, TEXT("response"));
+			if (ResponseObject.IsValid())
+			{
+				*FinalResponseText = SerializeJsonObject(ResponseObject);
+			}
+		}
 	}
 
 	static FString GetErrorFromResponse(const TSharedPtr<FJsonObject>& JsonObject, const FString& DefaultMessage)
@@ -226,6 +342,17 @@ void FUEAgentHttpClient::RequestMetrics(const FTextResponseCallback& Callback) c
 	SendTextRequest(TEXT("GET"), TEXT("/metrics"), Callback);
 }
 
+void FUEAgentHttpClient::RequestSessions(const FString& ProjectName, const int32 Limit, const FJsonResponseCallback& Callback) const
+{
+	FString RelativePath = FString::Printf(TEXT("/api/v1/sessions?include_archived=false&limit=%d"), FMath::Clamp(Limit, 1, 200));
+	const FString CleanProjectName = ProjectName.TrimStartAndEnd();
+	if (!CleanProjectName.IsEmpty())
+	{
+		RelativePath += FString::Printf(TEXT("&project_name=%s"), *FGenericPlatformHttp::UrlEncode(CleanProjectName));
+	}
+	SendRequest(TEXT("GET"), RelativePath, nullptr, Callback);
+}
+
 void FUEAgentHttpClient::CreateSession(const FString& PreferredSessionId, const FJsonResponseCallback& Callback) const
 {
 	TSharedPtr<FJsonObject> RequestBody = MakeShared<FJsonObject>();
@@ -265,6 +392,11 @@ void FUEAgentHttpClient::RequestSessionHistory(const FString& SessionId, const F
 void FUEAgentHttpClient::RequestSessionTasks(const FString& SessionId, const FJsonResponseCallback& Callback) const
 {
 	SendRequest(TEXT("GET"), FString::Printf(TEXT("/api/v1/sessions/%s/tasks"), *SessionId), nullptr, Callback);
+}
+
+void FUEAgentHttpClient::ArchiveSession(const FString& SessionId, const FJsonResponseCallback& Callback) const
+{
+	SendRequest(TEXT("POST"), FString::Printf(TEXT("/api/v1/sessions/%s/archive"), *SessionId), MakeShared<FJsonObject>(), Callback);
 }
 
 void FUEAgentHttpClient::ClearSession(const FString& SessionId, const FJsonResponseCallback& Callback) const
@@ -506,9 +638,22 @@ void FUEAgentHttpClient::SubmitFunction(
 	EUEAgentViewMode ActiveView,
 	const FJsonResponseCallback& Callback) const
 {
-	TSharedPtr<FJsonObject> BodyObject = BuildRequestPayload(FunctionType, Context, Parameters, InputText, ActiveView);
+	TSharedPtr<FJsonObject> BodyObject = BuildRequestPayload(FunctionType, Context, Parameters, InputText, ActiveView, false);
 	const FString Endpoint = UEAgent::UsesUnifiedChat(FunctionType) ? TEXT("/api/v1/chat/runs") : UEAgent::ToTaskEndpoint(FunctionType);
 	SendRequest(TEXT("POST"), Endpoint, BodyObject, Callback);
+}
+
+void FUEAgentHttpClient::SubmitFunctionStream(
+	EUEAgentFunctionType FunctionType,
+	const FUEAgentContextSummary& Context,
+	const FUEAgentFunctionParameters& Parameters,
+	const FString& InputText,
+	EUEAgentViewMode ActiveView,
+	const FStreamDeltaCallback& DeltaCallback,
+	const FJsonResponseCallback& Callback) const
+{
+	TSharedPtr<FJsonObject> BodyObject = BuildRequestPayload(FunctionType, Context, Parameters, InputText, ActiveView, true);
+	SendStreamingRequest(TEXT("/api/v1/chat/runs/stream"), BodyObject, DeltaCallback, Callback);
 }
 
 TSharedPtr<FJsonObject> FUEAgentHttpClient::BuildRequestPayload(
@@ -516,7 +661,8 @@ TSharedPtr<FJsonObject> FUEAgentHttpClient::BuildRequestPayload(
 	const FUEAgentContextSummary& Context,
 	const FUEAgentFunctionParameters& Parameters,
 	const FString& InputText,
-	const EUEAgentViewMode ActiveView) const
+	const EUEAgentViewMode ActiveView,
+	const bool bStream) const
 {
 	TSharedPtr<FJsonObject> RootObject = MakeShared<FJsonObject>();
 	RootObject->SetStringField(TEXT("task_type"), UEAgent::ToFunctionId(FunctionType));
@@ -532,7 +678,7 @@ TSharedPtr<FJsonObject> FUEAgentHttpClient::BuildRequestPayload(
 		{
 			for (const TSharedPtr<FUEAgentChatMessage>& Message : State->GetChatMessages())
 			{
-				if (!Message.IsValid() || Message->Text.IsEmpty())
+				if (!Message.IsValid() || Message->Text.IsEmpty() || Message->bStreaming)
 				{
 					continue;
 				}
@@ -711,7 +857,7 @@ TSharedPtr<FJsonObject> FUEAgentHttpClient::BuildRequestPayload(
 	{
 		RuntimeOptionsObject->SetStringField(TEXT("profile_id"), State->GetActiveProfileId());
 	}
-	RuntimeOptionsObject->SetBoolField(TEXT("stream"), false);
+	RuntimeOptionsObject->SetBoolField(TEXT("stream"), bStream);
 	RuntimeOptionsObject->SetBoolField(TEXT("debug"), true);
 	RuntimeOptionsObject->SetStringField(TEXT("preferred_output_language"), PreferredOutputLanguage);
 	RuntimeOptionsObject->SetBoolField(TEXT("return_debug_projection"), true);
@@ -767,6 +913,83 @@ void FUEAgentHttpClient::SendRequest(const FString& Verb, const FString& Relativ
 			}
 
 			Callback(true, TEXT("OK"), ResponseText, JsonObject);
+		});
+
+	Request->ProcessRequest();
+}
+
+void FUEAgentHttpClient::SendStreamingRequest(
+	const FString& RelativePath,
+	const TSharedPtr<FJsonObject>& BodyObject,
+	const FStreamDeltaCallback& DeltaCallback,
+	const FJsonResponseCallback& Callback) const
+{
+	const TSharedPtr<FUEAgentStateStore> State = StateStore.Pin();
+	if (!State.IsValid())
+	{
+		Callback(false, TEXT("State store is unavailable."), TEXT(""), nullptr);
+		return;
+	}
+
+	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
+	Request->SetURL(BuildUrl(RelativePath));
+	Request->SetVerb(TEXT("POST"));
+	Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
+	Request->SetHeader(TEXT("Accept"), TEXT("text/event-stream"));
+
+	const FString RequestBody = UEAgentHttpClientPrivate::SerializeJsonObject(BodyObject);
+	Request->SetContentAsString(RequestBody);
+	State->SetLastRequestJson(RequestBody);
+
+	TSharedRef<int32> ProcessedEventCount = MakeShared<int32>(0);
+	TSharedRef<FString> FinalResponseText = MakeShared<FString>();
+	const auto EventHandler = [DeltaCallback, FinalResponseText](const FString& EventName, const FString& DataText)
+	{
+		UEAgentHttpClientPrivate::HandleSseEvent(EventName, DataText, DeltaCallback, FinalResponseText);
+	};
+
+	Request->OnRequestProgress().BindLambda(
+		[ProcessedEventCount, EventHandler](FHttpRequestPtr HttpRequest, int32 BytesSent, int32 BytesReceived)
+		{
+			if (!HttpRequest.IsValid() || !HttpRequest->GetResponse().IsValid())
+			{
+				return;
+			}
+
+			const FString ResponseText = HttpRequest->GetResponse()->GetContentAsString();
+			UEAgentHttpClientPrivate::ProcessSseEvents(ResponseText, *ProcessedEventCount, EventHandler);
+		});
+
+	Request->OnProcessRequestComplete().BindLambda(
+		[Callback, ProcessedEventCount, FinalResponseText, EventHandler](FHttpRequestPtr HttpRequest, FHttpResponsePtr HttpResponse, const bool bSucceeded)
+		{
+			const bool bHasResponse = HttpResponse.IsValid();
+			const FString ResponseText = bHasResponse ? HttpResponse->GetContentAsString() : TEXT("");
+			if (!ResponseText.IsEmpty())
+			{
+				UEAgentHttpClientPrivate::ProcessSseEvents(ResponseText, *ProcessedEventCount, EventHandler);
+			}
+
+			const bool bHttpSuccess = bSucceeded && bHasResponse && EHttpResponseCodes::IsOk(HttpResponse->GetResponseCode());
+			if (!bHttpSuccess)
+			{
+				const FString FailureMessage = bHasResponse
+					? FString::Printf(TEXT("HTTP %d\n%s"), HttpResponse->GetResponseCode(), *ResponseText)
+					: TEXT("The backend streaming request failed. Check the base URL and backend status.");
+				Callback(false, FailureMessage, ResponseText, nullptr);
+				return;
+			}
+
+			const TSharedPtr<FJsonObject> FinalJsonObject = FinalResponseText->IsEmpty()
+				? nullptr
+				: UEAgentHttpClientPrivate::ParseJsonObject(*FinalResponseText);
+			if (!FinalJsonObject.IsValid())
+			{
+				Callback(false, TEXT("Streaming response did not include a final event. Falling back to a normal request is recommended."), ResponseText, nullptr);
+				return;
+			}
+
+			Callback(true, TEXT("OK"), ResponseText, FinalJsonObject);
 		});
 
 	Request->ProcessRequest();

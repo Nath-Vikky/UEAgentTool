@@ -24,6 +24,9 @@ private:
 	void RefreshEditorContext() const;
 	void InitializeSession();
 	void RestoreCurrentSession();
+	void RefreshSessionList();
+	void SwitchToSession(const TSharedPtr<FUEAgentSessionItem>& SessionItem);
+	void ArchiveSessionItem(const TSharedPtr<FUEAgentSessionItem>& SessionItem);
 	void ClearCurrentSession();
 	void RefreshBootstrapData() const;
 	void RefreshTaskData() const;
@@ -66,6 +69,7 @@ private:
 	TSharedRef<SWidget> BuildTopShell();
 	TSharedRef<SWidget> BuildSettingsPanel();
 	TSharedRef<SWidget> BuildUserWorkspace();
+	TSharedRef<SWidget> BuildSessionRail();
 	TSharedRef<SWidget> BuildDebugWorkspace();
 	TSharedRef<SWidget> BuildFunctionParameterPanel();
 	TSharedRef<SWidget> BuildFunctionSpecificForm(EUEAgentFunctionType FunctionType);
@@ -83,6 +87,7 @@ private:
 	TSharedRef<SWidget> BuildEmptyState(const FString& Message) const;
 
 	TSharedRef<class ITableRow> OnGenerateChatRow(TSharedPtr<FUEAgentChatMessage> Message, const TSharedRef<class STableViewBase>& OwnerTable) const;
+	TSharedRef<class ITableRow> OnGenerateSessionRow(TSharedPtr<FUEAgentSessionItem> SessionItem, const TSharedRef<class STableViewBase>& OwnerTable);
 	TSharedRef<class ITableRow> OnGenerateTaskRow(TSharedPtr<FUEAgentTaskSummary> TaskSummary, const TSharedRef<class STableViewBase>& OwnerTable) const;
 	void OnTaskSelectionChanged(TSharedPtr<FUEAgentTaskSummary> TaskSummary, ESelectInfo::Type SelectInfo);
 	void OnFunctionSelectionChanged(TSharedPtr<EUEAgentFunctionType> Selection, ESelectInfo::Type SelectInfo);
@@ -108,12 +113,14 @@ private:
 	TArray<TSharedPtr<EUEAgentDebugSection>> DebugSectionOptions;
 	TArray<TSharedPtr<FUEAgentRuntimeProfile>> RuntimeProfileOptions;
 	TArray<TSharedPtr<FUEAgentChatMessage>> ChatItems;
+	TArray<TSharedPtr<FUEAgentSessionItem>> SessionItems;
 	TArray<TSharedPtr<FUEAgentTaskSummary>> TaskItems;
 
 	TSharedPtr<class SComboBox<TSharedPtr<EUEAgentFunctionType>>> FunctionComboBox;
 	TSharedPtr<class SComboBox<TSharedPtr<EUEAgentDebugSection>>> DebugSectionComboBox;
 	TSharedPtr<class SComboBox<TSharedPtr<FUEAgentRuntimeProfile>>> RuntimeProfileComboBox;
 	TSharedPtr<class SListView<TSharedPtr<FUEAgentChatMessage>>> ChatListView;
+	TSharedPtr<class SListView<TSharedPtr<FUEAgentSessionItem>>> SessionListView;
 	TSharedPtr<class SListView<TSharedPtr<FUEAgentTaskSummary>>> TaskListView;
 	TSharedPtr<class SBox> ParameterPanelBox;
 	TSharedPtr<class SBox> ResultCardsBox;

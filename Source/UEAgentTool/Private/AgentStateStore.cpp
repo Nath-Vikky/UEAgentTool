@@ -2,6 +2,7 @@
 
 #include "AgentStateStore.h"
 
+#include "Containers/Set.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Misc/ConfigCacheIni.h"
@@ -173,6 +174,38 @@ namespace UEAgentStateStorePrivate
 
 		int32 Value = DefaultValue;
 		return JsonObject->TryGetNumberField(FieldName, Value) ? Value : DefaultValue;
+	}
+
+	static void EnsureSessionItem(TArray<TSharedPtr<FUEAgentSessionItem>>& Items, const FString& InSessionId, const FString& ProjectName, const FString& Title)
+	{
+		const FString SanitizedSessionId = InSessionId.TrimStartAndEnd();
+		if (SanitizedSessionId.IsEmpty())
+		{
+			return;
+		}
+
+		for (const TSharedPtr<FUEAgentSessionItem>& Item : Items)
+		{
+			if (Item.IsValid() && Item->SessionId == SanitizedSessionId)
+			{
+				if (!ProjectName.IsEmpty() && Item->ProjectName.IsEmpty())
+				{
+					Item->ProjectName = ProjectName;
+				}
+				if (!Title.IsEmpty() && (Item->Title.IsEmpty() || Item->Title == TEXT("New Chat")))
+				{
+					Item->Title = Title;
+				}
+				return;
+			}
+		}
+
+		TSharedPtr<FUEAgentSessionItem> Item = MakeShared<FUEAgentSessionItem>();
+		Item->SessionId = SanitizedSessionId;
+		Item->Title = Title.IsEmpty() ? FString::Printf(TEXT("Chat %s"), *SanitizedSessionId.Left(8)) : Title;
+		Item->ProjectName = ProjectName;
+		Item->WindowKind = TEXT("agent_chat");
+		Items.Insert(Item, 0);
 	}
 
 	static FString NormalizePreferredOutputLanguage(const FString& LanguageCode)
@@ -1440,6 +1473,46 @@ bool FUEAgentStateStore::IsSettingsExpanded() const
 	return bSettingsExpanded;
 }
 
+void FUEAgentStateStore::SetStreamingEnabled(const bool bEnabled, const bool bBroadcast)
+{
+	if (bStreamingEnabled == bEnabled)
+	{
+		return;
+	}
+
+	bStreamingEnabled = bEnabled;
+	PersistState();
+	if (bBroadcast)
+	{
+		BroadcastStateChanged();
+	}
+}
+
+bool FUEAgentStateStore::IsStreamingEnabled() const
+{
+	return bStreamingEnabled;
+}
+
+void FUEAgentStateStore::SetSessionRailExpanded(const bool bExpanded, const bool bBroadcast)
+{
+	if (bSessionRailExpanded == bExpanded)
+	{
+		return;
+	}
+
+	bSessionRailExpanded = bExpanded;
+	PersistState();
+	if (bBroadcast)
+	{
+		BroadcastStateChanged();
+	}
+}
+
+bool FUEAgentStateStore::IsSessionRailExpanded() const
+{
+	return bSessionRailExpanded;
+}
+
 void FUEAgentStateStore::SetBackendBaseUrl(const FString& InBaseUrl)
 {
 	BackendBaseUrl = InBaseUrl;
@@ -1542,6 +1615,28 @@ void FUEAgentStateStore::SetSessionId(const FString& InSessionId, const bool bBr
 	}
 }
 
+void FUEAgentStateStore::SwitchToSession(const FString& InSessionId)
+{
+	const FString SanitizedSessionId = InSessionId.TrimStartAndEnd();
+	if (SanitizedSessionId.IsEmpty() || SanitizedSessionId == SessionId)
+	{
+		return;
+	}
+
+	SessionId = SanitizedSessionId;
+	EditorContext.SessionId = SessionId;
+	ChatMessages.Reset();
+	RecentTasks.Reset();
+	LastResult = FUEAgentResultSnapshot();
+	LastSessionHistoryJson = TEXT("{}");
+	bSessionSynchronized = false;
+	SessionStatusText = TEXT("Switching session...");
+	StatusMessage = FString::Printf(TEXT("Switched to session %s"), *GetShortSessionId());
+	UEAgentStateStorePrivate::EnsureSessionItem(SessionItems, SessionId, EditorContext.ProjectName, FString::Printf(TEXT("Chat %s"), *GetShortSessionId()));
+	PersistState();
+	BroadcastStateChanged();
+}
+
 bool FUEAgentStateStore::IsSessionSynchronized() const
 {
 	return bSessionSynchronized;
@@ -1564,6 +1659,7 @@ void FUEAgentStateStore::ResetSession()
 	bSessionSynchronized = false;
 	SessionStatusText = TEXT("Local session");
 	StatusMessage = TEXT("Ready.");
+	UEAgentStateStorePrivate::EnsureSessionItem(SessionItems, SessionId, EditorContext.ProjectName, FString::Printf(TEXT("Chat %s"), *GetShortSessionId()));
 	PersistState();
 	BroadcastStateChanged();
 }
@@ -1644,6 +1740,98 @@ void FUEAgentStateStore::AppendSystemMessage(const FString& InText, const FStrin
 	Message->Text = InText;
 	ChatMessages.Add(Message);
 	BroadcastStateChanged();
+}
+
+void FUEAgentStateStore::BeginStreamingAssistantMessage(const EUEAgentFunctionType FunctionType)
+{
+	DiscardStreamingAssistantMessage();
+	TSharedPtr<FUEAgentChatMessage> Message = MakeShared<FUEAgentChatMessage>();
+	Message->MessageId = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	Message->SessionId = SessionId;
+	Message->FunctionId = UEAgent::ToFunctionId(FunctionType);
+	Message->Role = EUEAgentChatRole::Agent;
+	Message->Title = TEXT("UE Agent");
+	Message->Text = TEXT("");
+	Message->StatusHint = TEXT("Streaming...");
+	Message->bStreaming = true;
+	Message->bIncomplete = true;
+	ChatMessages.Add(Message);
+	BroadcastStateChanged();
+}
+
+void FUEAgentStateStore::AppendStreamingAssistantDelta(const FString& DeltaText)
+{
+	if (DeltaText.IsEmpty())
+	{
+		return;
+	}
+
+	for (int32 Index = ChatMessages.Num() - 1; Index >= 0; --Index)
+	{
+		const TSharedPtr<FUEAgentChatMessage>& Message = ChatMessages[Index];
+		if (Message.IsValid() && Message->bStreaming && Message->SessionId == SessionId)
+		{
+			Message->Text += DeltaText;
+			Message->StatusHint = TEXT("Streaming...");
+			BroadcastStateChanged();
+			return;
+		}
+	}
+
+	BeginStreamingAssistantMessage(ActiveFunction);
+	AppendStreamingAssistantDelta(DeltaText);
+}
+
+void FUEAgentStateStore::DiscardStreamingAssistantMessage()
+{
+	const int32 RemovedCount = ChatMessages.RemoveAll([](const TSharedPtr<FUEAgentChatMessage>& Message)
+	{
+		return Message.IsValid() && Message->bStreaming;
+	});
+	if (RemovedCount > 0)
+	{
+		BroadcastStateChanged();
+	}
+}
+
+bool FUEAgentStateStore::HasStreamingAssistantMessage() const
+{
+	for (const TSharedPtr<FUEAgentChatMessage>& Message : ChatMessages)
+	{
+		if (Message.IsValid() && Message->bStreaming && Message->SessionId == SessionId)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void FUEAgentStateStore::FinalizeStreamingAssistantMessage(
+	const FString& InTitle,
+	const FString& InText,
+	const FString& InStatusHint,
+	const FString& InTaskId,
+	const FString& InFunctionId,
+	const bool bIncomplete)
+{
+	for (int32 Index = ChatMessages.Num() - 1; Index >= 0; --Index)
+	{
+		const TSharedPtr<FUEAgentChatMessage>& Message = ChatMessages[Index];
+		if (Message.IsValid() && Message->bStreaming && Message->SessionId == SessionId)
+		{
+			Message->TaskId = InTaskId;
+			Message->FunctionId = InFunctionId.IsEmpty() ? UEAgent::ToFunctionId(ActiveFunction) : InFunctionId;
+			Message->Title = InTitle.IsEmpty() ? TEXT("UE Agent") : InTitle;
+			Message->Text = InText;
+			Message->StatusHint = InStatusHint;
+			Message->bStreaming = false;
+			Message->bIncomplete = bIncomplete;
+			BroadcastStateChanged();
+			return;
+		}
+	}
+
+	AppendAssistantMessage(InTitle, InText, InStatusHint, InTaskId, InFunctionId);
 }
 
 const TArray<TSharedPtr<FUEAgentChatMessage>>& FUEAgentStateStore::GetChatMessages() const
@@ -1869,6 +2057,55 @@ void FUEAgentStateStore::ApplyProposalListResponse(const TSharedPtr<FJsonObject>
 		TSharedPtr<FUEAgentProposalSummary> Proposal = MakeShared<FUEAgentProposalSummary>();
 		UEAgentStateStorePrivate::PopulateProposalSummary(ProposalObject, *Proposal);
 		PendingProposals.Add(Proposal);
+	}
+	BroadcastStateChanged();
+}
+
+void FUEAgentStateStore::ApplySessionListResponse(const TSharedPtr<FJsonObject>& ResponseObject)
+{
+	const TArray<TSharedPtr<FUEAgentSessionItem>> PreviousItems = SessionItems;
+	TSet<FString> SeenSessionIds;
+	SessionItems.Reset();
+	for (const TSharedPtr<FJsonValue>& ItemValue : UEAgentStateStorePrivate::GetArrayField(ResponseObject, TEXT("items")))
+	{
+		const TSharedPtr<FJsonObject> ItemObject = ItemValue.IsValid() ? ItemValue->AsObject() : nullptr;
+		if (!ItemObject.IsValid())
+		{
+			continue;
+		}
+
+		TSharedPtr<FUEAgentSessionItem> Item = MakeShared<FUEAgentSessionItem>();
+		Item->SessionId = UEAgentStateStorePrivate::GetStringOrDefault(ItemObject, TEXT("session_id"));
+		if (Item->SessionId.IsEmpty())
+		{
+			continue;
+		}
+		Item->Title = UEAgentStateStorePrivate::GetStringOrDefault(ItemObject, TEXT("title"), TEXT("New Chat"));
+		Item->ProjectName = UEAgentStateStorePrivate::GetStringOrDefault(ItemObject, TEXT("project_name"));
+		Item->WindowKind = UEAgentStateStorePrivate::GetStringOrDefault(ItemObject, TEXT("window_kind"), TEXT("agent_chat"));
+		Item->LatestMessageAt = UEAgentStateStorePrivate::GetStringOrDefault(ItemObject, TEXT("latest_message_at"));
+		Item->UpdatedAt = UEAgentStateStorePrivate::GetStringOrDefault(ItemObject, TEXT("updated_at"));
+		Item->MessageCount = UEAgentStateStorePrivate::GetIntOrDefault(ItemObject, TEXT("message_count"), 0);
+		Item->TaskCount = UEAgentStateStorePrivate::GetIntOrDefault(ItemObject, TEXT("task_count"), 0);
+		Item->bArchived = UEAgentStateStorePrivate::GetBoolOrDefault(ItemObject, TEXT("archived"), false);
+		Item->bPinned = UEAgentStateStorePrivate::GetBoolOrDefault(ItemObject, TEXT("pinned"), false);
+		SeenSessionIds.Add(Item->SessionId);
+		SessionItems.Add(Item);
+	}
+
+	for (const TSharedPtr<FUEAgentSessionItem>& PreviousItem : PreviousItems)
+	{
+		if (!PreviousItem.IsValid() || PreviousItem->SessionId.IsEmpty() || PreviousItem->bArchived || SeenSessionIds.Contains(PreviousItem->SessionId))
+		{
+			continue;
+		}
+		SeenSessionIds.Add(PreviousItem->SessionId);
+		SessionItems.Add(PreviousItem);
+	}
+
+	if (!SessionId.IsEmpty() && !SeenSessionIds.Contains(SessionId))
+	{
+		UEAgentStateStorePrivate::EnsureSessionItem(SessionItems, SessionId, EditorContext.ProjectName, FString::Printf(TEXT("Chat %s"), *GetShortSessionId()));
 	}
 	BroadcastStateChanged();
 }
@@ -2518,7 +2755,14 @@ void FUEAgentStateStore::ApplyUnifiedResponse(const TSharedPtr<FJsonObject>& Res
 	if (bResponseIsChat)
 	{
 		const FString ChatMessageText = LastResult.AssistantMessage.IsEmpty() ? LastResult.UserText : LastResult.AssistantMessage;
-		AppendAssistantMessage(LastResult.UserTitle, ChatMessageText, LastResult.StatusHint, LastResult.TaskId, ResponseTaskType);
+		if (HasStreamingAssistantMessage())
+		{
+			FinalizeStreamingAssistantMessage(LastResult.UserTitle, ChatMessageText, LastResult.StatusHint, LastResult.TaskId, ResponseTaskType, !LastResult.bOutputComplete);
+		}
+		else
+		{
+			AppendAssistantMessage(LastResult.UserTitle, ChatMessageText, LastResult.StatusHint, LastResult.TaskId, ResponseTaskType);
+		}
 	}
 	AddOrUpdateRecentTask(LastResult);
 	StatusMessage = !ReviewScopeError.IsEmpty()
@@ -2880,6 +3124,11 @@ const TArray<TSharedPtr<FUEAgentProposalSummary>>& FUEAgentStateStore::GetPendin
 	return PendingProposals;
 }
 
+const TArray<TSharedPtr<FUEAgentSessionItem>>& FUEAgentStateStore::GetSessionItems() const
+{
+	return SessionItems;
+}
+
 const TArray<TSharedPtr<FUEAgentCodeFileItem>>& FUEAgentStateStore::GetCodeReviewFiles() const
 {
 	return CodeReviewFiles;
@@ -2950,9 +3199,11 @@ void FUEAgentStateStore::LoadPersistedState()
 		GConfig->GetString(UEAgentStateStorePrivate::ConfigSection, TEXT("SessionId"), SessionId, GEditorPerProjectIni);
 		GConfig->GetString(UEAgentStateStorePrivate::ConfigSection, TEXT("ActiveProfileId"), ActiveProfileId, GEditorPerProjectIni);
 		GConfig->GetString(UEAgentStateStorePrivate::ConfigSection, TEXT("PreferredOutputLanguage"), PreferredOutputLanguage, GEditorPerProjectIni);
+		GConfig->GetBool(UEAgentStateStorePrivate::ConfigSection, TEXT("SessionRailExpanded"), bSessionRailExpanded, GEditorPerProjectIni);
 	}
 
 	PreferredOutputLanguage = UEAgentStateStorePrivate::NormalizePreferredOutputLanguage(PreferredOutputLanguage);
+	bStreamingEnabled = false;
 
 	if (SessionId.IsEmpty())
 	{
@@ -2974,6 +3225,7 @@ void FUEAgentStateStore::PersistState() const
 	GConfig->SetString(UEAgentStateStorePrivate::ConfigSection, TEXT("SessionId"), *SessionId, GEditorPerProjectIni);
 	GConfig->SetString(UEAgentStateStorePrivate::ConfigSection, TEXT("ActiveProfileId"), *ActiveProfileId, GEditorPerProjectIni);
 	GConfig->SetString(UEAgentStateStorePrivate::ConfigSection, TEXT("PreferredOutputLanguage"), *PreferredOutputLanguage, GEditorPerProjectIni);
+	GConfig->SetBool(UEAgentStateStorePrivate::ConfigSection, TEXT("SessionRailExpanded"), bSessionRailExpanded, GEditorPerProjectIni);
 	GConfig->Flush(false, GEditorPerProjectIni);
 }
 

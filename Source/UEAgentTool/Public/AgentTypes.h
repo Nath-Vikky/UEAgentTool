@@ -83,6 +83,20 @@ struct FUEAgentChatMessage
 	bool bIncomplete = false;
 };
 
+struct FUEAgentSessionItem
+{
+	FString SessionId;
+	FString Title;
+	FString ProjectName;
+	FString WindowKind = TEXT("agent_chat");
+	FString LatestMessageAt;
+	FString UpdatedAt;
+	int32 MessageCount = 0;
+	int32 TaskCount = 0;
+	bool bArchived = false;
+	bool bPinned = false;
+};
+
 struct FUEAgentCitation
 {
 	FString Title;

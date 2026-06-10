@@ -158,6 +158,11 @@ namespace UEAgentRootPanelPrivate
 		return FLinearColor(0.72f, 0.38f, 0.12f, 1.0f);
 	}
 
+	static FLinearColor SidebarButtonColor(const bool bActive)
+	{
+		return bActive ? AgentAccentColor() : FLinearColor(0.066f, 0.076f, 0.096f, 1.0f);
+	}
+
 	static TSharedRef<SWidget> MakeUiPill(const FString& Label, const FLinearColor& BackgroundColor)
 	{
 		return SNew(SBorder)
@@ -6711,7 +6716,7 @@ void SAgentRootPanel::Construct(const FArguments& InArgs)
 			.AutoWidth()
 			[
 				SNew(SBox)
-				.WidthOverride(312.0f)
+				.WidthOverride(288.0f)
 				[
 					BuildTopShell()
 				]
@@ -6821,6 +6826,11 @@ void SAgentRootPanel::HandleStateChanged()
 		}
 	}
 
+	if (SessionListView.IsValid())
+	{
+		SessionListView->RequestListRefresh();
+	}
+
 	if (TaskListView.IsValid())
 	{
 		TaskListView->RequestListRefresh();
@@ -6864,6 +6874,7 @@ void SAgentRootPanel::SyncStateSnapshots()
 		}
 	}
 	TaskItems = StateStore->GetRecentTasks();
+	SessionItems = StateStore->GetSessionItems();
 	RuntimeProfileOptions = StateStore->GetRuntimeProfiles();
 }
 
@@ -6874,6 +6885,7 @@ void SAgentRootPanel::RefreshEditorContext() const
 
 void SAgentRootPanel::InitializeSession()
 {
+	RefreshSessionList();
 	const FString CurrentSessionId = StateStore->GetSessionId();
 	HttpClient->RequestSessionSummary(CurrentSessionId, [WeakThis = TWeakPtr<SAgentRootPanel>(SharedThis(this)), StateStore = StateStore, CurrentSessionId](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
 	{
@@ -6896,6 +6908,7 @@ void SAgentRootPanel::InitializeSession()
 					StateStore->ApplySessionSummaryResponse(CreateJsonObject);
 					if (const TSharedPtr<SAgentRootPanel> This = WeakThis.Pin())
 					{
+						This->RefreshSessionList();
 						This->RestoreCurrentSession();
 					}
 				}
@@ -6904,6 +6917,23 @@ void SAgentRootPanel::InitializeSession()
 					StateStore->AppendSystemMessage(FString::Printf(TEXT("Backend session bootstrap unavailable, using local session. %s"), *CreateMessage), TEXT("Session"));
 				}
 			});
+		}
+	});
+}
+
+void SAgentRootPanel::RefreshSessionList()
+{
+	RefreshEditorContext();
+	const FString ProjectName = StateStore->GetEditorContext().ProjectName;
+	HttpClient->RequestSessions(ProjectName, 50, [StateStore = StateStore](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	{
+		if (bSuccess)
+		{
+			StateStore->ApplySessionListResponse(JsonObject);
+		}
+		else
+		{
+			StateStore->AppendSystemMessage(FString::Printf(TEXT("Session list refresh skipped: %s"), *Message), TEXT("Session"));
 		}
 	});
 }
@@ -6928,23 +6958,77 @@ void SAgentRootPanel::RestoreCurrentSession()
 		}
 	});
 
-	HttpClient->RequestSessionTasks(SessionId, [StateStore = StateStore, WeakThis = TWeakPtr<SAgentRootPanel>(SharedThis(this))](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	HttpClient->RequestSessionTasks(SessionId, [StateStore = StateStore](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
 	{
 		if (bSuccess)
 		{
 			StateStore->ApplySessionTasksResponse(JsonObject);
-			if (const TSharedPtr<SAgentRootPanel> This = WeakThis.Pin())
-			{
-				const FUEAgentResultSnapshot& Result = StateStore->GetLastResult();
-				if (Result.TaskId.IsEmpty() && Result.RunId.IsEmpty() && StateStore->GetRecentTasks().Num() > 0)
-				{
-					This->LoadTaskDetail(StateStore->GetRecentTasks()[0]);
-				}
-			}
 		}
 		else
 		{
 			StateStore->AppendSystemMessage(FString::Printf(TEXT("Session task restore skipped: %s"), *Message), TEXT("Session"));
+		}
+	});
+}
+
+void SAgentRootPanel::SwitchToSession(const TSharedPtr<FUEAgentSessionItem>& SessionItem)
+{
+	if (!SessionItem.IsValid() || SessionItem->SessionId.IsEmpty() || SessionItem->SessionId == StateStore->GetSessionId())
+	{
+		return;
+	}
+
+	StateStore->SwitchToSession(SessionItem->SessionId);
+	HttpClient->CreateSession(SessionItem->SessionId, [StateStore = StateStore, WeakThis = TWeakPtr<SAgentRootPanel>(SharedThis(this))](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	{
+		if (bSuccess)
+		{
+			StateStore->ApplySessionSummaryResponse(JsonObject);
+		}
+		else
+		{
+			StateStore->AppendSystemMessage(FString::Printf(TEXT("Session switch sync skipped: %s"), *Message), TEXT("Session"));
+		}
+		if (const TSharedPtr<SAgentRootPanel> This = WeakThis.Pin())
+		{
+			This->RestoreCurrentSession();
+			This->RefreshSessionList();
+		}
+	});
+}
+
+void SAgentRootPanel::ArchiveSessionItem(const TSharedPtr<FUEAgentSessionItem>& SessionItem)
+{
+	if (!SessionItem.IsValid() || SessionItem->SessionId.IsEmpty())
+	{
+		return;
+	}
+
+	const bool bArchivingActiveSession = SessionItem->SessionId == StateStore->GetSessionId();
+	HttpClient->ArchiveSession(SessionItem->SessionId, [StateStore = StateStore, WeakThis = TWeakPtr<SAgentRootPanel>(SharedThis(this)), SessionItem, bArchivingActiveSession](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
+	{
+		if (!bSuccess)
+		{
+			StateStore->AppendSystemMessage(FString::Printf(TEXT("Session delete skipped: %s"), *Message), TEXT("Session"));
+			return;
+		}
+
+		if (SessionItem.IsValid())
+		{
+			SessionItem->bArchived = true;
+		}
+
+		if (const TSharedPtr<SAgentRootPanel> This = WeakThis.Pin())
+		{
+			if (bArchivingActiveSession)
+			{
+				StateStore->ResetSession();
+				This->InitializeSession();
+			}
+			else
+			{
+				This->RefreshSessionList();
+			}
 		}
 	});
 }
@@ -7685,12 +7769,7 @@ void SAgentRootPanel::SubmitCurrentRequest()
 	}
 	StateStore->SetBusy(true, TEXT("Sending request..."));
 
-	HttpClient->SubmitFunction(
-		FunctionType,
-		StateStore->GetEditorContext(),
-		Parameters,
-		InputText,
-		StateStore->GetActiveViewMode(),
+	const FUEAgentHttpClient::FJsonResponseCallback CompletionHandler =
 		[StateStore = StateStore, WeakThis = TWeakPtr<SAgentRootPanel>(SharedThis(this))](bool bSuccess, const FString& Message, const FString& RawText, TSharedPtr<FJsonObject> JsonObject)
 		{
 			StateStore->SetBusy(false);
@@ -7714,9 +7793,18 @@ void SAgentRootPanel::SubmitCurrentRequest()
 					This->RefreshProjectionDataForCurrentResult();
 					This->RefreshTraceDataForCurrentResult();
 					This->RefreshTaskData();
+					This->RefreshSessionList();
 				}
 			}
-		});
+		};
+
+	HttpClient->SubmitFunction(
+		FunctionType,
+		StateStore->GetEditorContext(),
+		Parameters,
+		InputText,
+		StateStore->GetActiveViewMode(),
+		CompletionHandler);
 }
 
 FString SAgentRootPanel::GetCurrentRequestValidationError(const FUEAgentFunctionParameters& Parameters, const FString& InputText) const
@@ -8438,34 +8526,17 @@ TSharedRef<SWidget> SAgentRootPanel::BuildTopShell()
 				SNew(SBorder)
 				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
 				.BorderBackgroundColor(UEAgentRootPanelPrivate::SubtlePanelColor())
-				.Padding(6.0f)
+				.Padding(8.0f)
 				[
 					SNew(SVerticalBox)
-					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 6.0f)
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 7.0f)
 					[
-						SNew(SHorizontalBox)
-						+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0.0f, 0.0f, 4.0f, 0.0f)
-						[
-							SNew(SButton)
-							.Text(FText::FromString(TEXT("ZH")))
-							.ButtonColorAndOpacity_Lambda([this]()
-							{
-								return !UEAgent::IsEnglishOutputLanguage(StateStore->GetPreferredOutputLanguage()) ? UEAgentRootPanelPrivate::SuccessAccentColor() : FLinearColor(0.12f, 0.13f, 0.15f, 1.0f);
-							})
-							.OnClicked_Lambda([this]() { SetPreferredOutputLanguage(TEXT("zh-CN")); return FReply::Handled(); })
-						]
-						+ SHorizontalBox::Slot().FillWidth(1.0f)
-						[
-							SNew(SButton)
-							.Text(FText::FromString(TEXT("EN")))
-							.ButtonColorAndOpacity_Lambda([this]()
-							{
-								return UEAgent::IsEnglishOutputLanguage(StateStore->GetPreferredOutputLanguage()) ? UEAgentRootPanelPrivate::SuccessAccentColor() : FLinearColor(0.12f, 0.13f, 0.15f, 1.0f);
-							})
-							.OnClicked_Lambda([this]() { SetPreferredOutputLanguage(TEXT("en-US")); return FReply::Handled(); })
-						]
+						SNew(STextBlock)
+						.Text(FText::FromString(TEXT("Workspace")))
+						.Font(FAppStyle::GetFontStyle("SmallFont"))
+						.ColorAndOpacity(FSlateColor::UseSubduedForeground())
 					]
-					+ SVerticalBox::Slot().AutoHeight()
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 8.0f)
 					[
 						SNew(SHorizontalBox)
 						+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0.0f, 0.0f, 4.0f, 0.0f)
@@ -8474,7 +8545,7 @@ TSharedRef<SWidget> SAgentRootPanel::BuildTopShell()
 							.Text(FText::FromString(TEXT("User")))
 							.ButtonColorAndOpacity_Lambda([this]()
 							{
-								return StateStore->GetActiveViewMode() == EUEAgentViewMode::User ? UEAgentRootPanelPrivate::AgentAccentColor() : FLinearColor(0.12f, 0.13f, 0.15f, 1.0f);
+								return UEAgentRootPanelPrivate::SidebarButtonColor(StateStore->GetActiveViewMode() == EUEAgentViewMode::User);
 							})
 							.OnClicked_Lambda([this]() { StateStore->SetActiveViewMode(EUEAgentViewMode::User); return FReply::Handled(); })
 						]
@@ -8484,9 +8555,40 @@ TSharedRef<SWidget> SAgentRootPanel::BuildTopShell()
 							.Text(FText::FromString(TEXT("Debug")))
 							.ButtonColorAndOpacity_Lambda([this]()
 							{
-								return StateStore->GetActiveViewMode() == EUEAgentViewMode::Debug ? UEAgentRootPanelPrivate::WarningAccentColor() : FLinearColor(0.12f, 0.13f, 0.15f, 1.0f);
+								return StateStore->GetActiveViewMode() == EUEAgentViewMode::Debug ? UEAgentRootPanelPrivate::WarningAccentColor() : FLinearColor(0.066f, 0.076f, 0.096f, 1.0f);
 							})
 							.OnClicked_Lambda([this]() { StateStore->SetActiveViewMode(EUEAgentViewMode::Debug); return FReply::Handled(); })
+						]
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 6.0f)
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(TEXT("Language")))
+						.Font(FAppStyle::GetFontStyle("SmallFont"))
+						.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+					]
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0.0f, 0.0f, 4.0f, 0.0f)
+						[
+							SNew(SButton)
+							.Text(FText::FromString(TEXT("ZH")))
+							.ButtonColorAndOpacity_Lambda([this]()
+							{
+								return !UEAgent::IsEnglishOutputLanguage(StateStore->GetPreferredOutputLanguage()) ? UEAgentRootPanelPrivate::SuccessAccentColor() : FLinearColor(0.066f, 0.076f, 0.096f, 1.0f);
+							})
+							.OnClicked_Lambda([this]() { SetPreferredOutputLanguage(TEXT("zh-CN")); return FReply::Handled(); })
+						]
+						+ SHorizontalBox::Slot().FillWidth(1.0f)
+						[
+							SNew(SButton)
+							.Text(FText::FromString(TEXT("EN")))
+							.ButtonColorAndOpacity_Lambda([this]()
+							{
+								return UEAgent::IsEnglishOutputLanguage(StateStore->GetPreferredOutputLanguage()) ? UEAgentRootPanelPrivate::SuccessAccentColor() : FLinearColor(0.066f, 0.076f, 0.096f, 1.0f);
+							})
+							.OnClicked_Lambda([this]() { SetPreferredOutputLanguage(TEXT("en-US")); return FReply::Handled(); })
 						]
 					]
 				]
@@ -8494,25 +8596,19 @@ TSharedRef<SWidget> SAgentRootPanel::BuildTopShell()
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 8.0f)
 			[
 				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("Actions")))
+				.Text(FText::FromString(TEXT("Quick Actions")))
 				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
 			]
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 12.0f)
 			[
-				SNew(SVerticalBox)
-				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 6.0f)
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0.0f, 0.0f, 4.0f, 0.0f)
 				[
 					SNew(SButton)
-					.Text(FText::FromString(TEXT("Sync Inventory")))
+					.Text(FText::FromString(TEXT("Sync")))
 					.OnClicked_Lambda([this]() { SubmitProjectInventorySnapshot(); return FReply::Handled(); })
 				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 6.0f)
-				[
-					SNew(SButton)
-					.Text(FText::FromString(TEXT("Tool Catalog")))
-					.OnClicked_Lambda([this]() { ShowEditorOperationCapabilities(); return FReply::Handled(); })
-				]
-				+ SVerticalBox::Slot().AutoHeight()
+				+ SHorizontalBox::Slot().FillWidth(1.0f)
 				[
 					SNew(SButton)
 					.Text(FText::FromString(TEXT("Settings")))
@@ -8865,23 +8961,86 @@ TSharedRef<SWidget> SAgentRootPanel::BuildUserWorkspace()
 			]
 			+ SVerticalBox::Slot().FillHeight(1.0f).Padding(0.0f, 0.0f, 0.0f, 8.0f)
 			[
-				SNew(SBorder)
+				SNew(SHorizontalBox)
 				.Visibility_Lambda([this]() { return UEAgent::UsesUnifiedChat(StateStore->GetActiveFunction()) ? EVisibility::Visible : EVisibility::Collapsed; })
-				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-				.BorderBackgroundColor(UEAgentRootPanelPrivate::SubtlePanelColor())
-				.Padding(8.0f)
+				+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0.0f, 0.0f, 8.0f, 0.0f)
+				[
+					SNew(SBorder)
+					.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+					.BorderBackgroundColor(UEAgentRootPanelPrivate::SubtlePanelColor())
+					.Padding(8.0f)
+					[
+						SNew(SVerticalBox)
+						+ SVerticalBox::Slot().AutoHeight().Padding(2.0f, 0.0f, 2.0f, 8.0f)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
+							[
+								SNew(STextBlock)
+								.Text(FText::FromString(TEXT("Conversation")))
+								.Font(FAppStyle::GetFontStyle("HeadingExtraSmall"))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							[
+								UEAgentRootPanelPrivate::MakeMutedPill(TEXT("User View"))
+							]
+						]
+						+ SVerticalBox::Slot().FillHeight(1.0f)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().FillWidth(1.0f)
+							[
+								SAssignNew(ChatListView, SListView<TSharedPtr<FUEAgentChatMessage>>)
+								.ListItemsSource(&ChatItems)
+								.SelectionMode(ESelectionMode::None)
+								.OnGenerateRow(this, &SAgentRootPanel::OnGenerateChatRow)
+							]
+							+ SHorizontalBox::Slot().AutoWidth().Padding(5.0f, 3.0f, 0.0f, 3.0f)
+							[
+								BuildChatScrollIndicator()
+							]
+						]
+					]
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Fill).Padding(6.0f, 0.0f, 0.0f, 0.0f)
 				[
 					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().FillWidth(1.0f)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Fill)
 					[
-						SAssignNew(ChatListView, SListView<TSharedPtr<FUEAgentChatMessage>>)
-						.ListItemsSource(&ChatItems)
-						.SelectionMode(ESelectionMode::None)
-						.OnGenerateRow(this, &SAgentRootPanel::OnGenerateChatRow)
+						SNew(SButton)
+						.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+						.ToolTipText(FText::FromString(TEXT("Show or hide chat sessions.")))
+						.OnClicked_Lambda([this]()
+						{
+							StateStore->SetSessionRailExpanded(!StateStore->IsSessionRailExpanded());
+							return FReply::Handled();
+						})
+						[
+							SNew(SBox)
+							.WidthOverride(24.0f)
+							.VAlign(VAlign_Center)
+							[
+								SNew(STextBlock)
+								.Text_Lambda([this]()
+								{
+									return StateStore->IsSessionRailExpanded()
+										? FText::FromString(TEXT("<"))
+										: FText::FromString(TEXT(">"));
+								})
+								.Justification(ETextJustify::Center)
+							]
+						]
 					]
-					+ SHorizontalBox::Slot().AutoWidth().Padding(5.0f, 3.0f, 0.0f, 3.0f)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Fill)
 					[
-						BuildChatScrollIndicator()
+						SNew(SBox)
+						.Visibility_Lambda([this]()
+						{
+							return StateStore->IsSessionRailExpanded() ? EVisibility::Visible : EVisibility::Collapsed;
+						})
+						[
+							BuildSessionRail()
+						]
 					]
 				]
 			]
@@ -8898,6 +9057,7 @@ TSharedRef<SWidget> SAgentRootPanel::BuildUserWorkspace()
 					[
 						SAssignNew(ChatInputBox, SMultiLineEditableTextBox)
 						.HintText(FText::FromString(TEXT("Ask about the current project, selected assets, code, logs, or editor actions...")))
+						.AutoWrapText(true)
 					]
 					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 8.0f, 0.0f, 0.0f)
 					[
@@ -8918,6 +9078,71 @@ TSharedRef<SWidget> SAgentRootPanel::BuildUserWorkspace()
 							.OnClicked_Lambda([this]() { SubmitCurrentRequest(); return FReply::Handled(); })
 						]
 					]
+				]
+			]
+		];
+}
+
+TSharedRef<SWidget> SAgentRootPanel::BuildSessionRail()
+{
+	return SNew(SBox)
+		.WidthOverride(244.0f)
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+			.BorderBackgroundColor(FLinearColor(0.018f, 0.022f, 0.032f, 1.0f))
+			.Padding(8.0f)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 8.0f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(TEXT("Chats")))
+						.Font(FAppStyle::GetFontStyle("HeadingExtraSmall"))
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						UEAgentRootPanelPrivate::MakeMutedPill(FString::Printf(TEXT("%d"), SessionItems.Num()))
+					]
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 8.0f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0.0f, 0.0f, 4.0f, 0.0f)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("New")))
+						.ToolTipText(FText::FromString(TEXT("Create a fresh isolated chat session.")))
+						.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+						.OnClicked_Lambda([this]()
+						{
+							StateStore->ResetSession();
+							InitializeSession();
+							return FReply::Handled();
+						})
+					]
+					+ SHorizontalBox::Slot().FillWidth(1.0f)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Refresh")))
+						.ToolTipText(FText::FromString(TEXT("Reload chat windows from the backend.")))
+						.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+						.OnClicked_Lambda([this]()
+						{
+							RefreshSessionList();
+							return FReply::Handled();
+						})
+					]
+				]
+				+ SVerticalBox::Slot().FillHeight(1.0f)
+				[
+					SAssignNew(SessionListView, SListView<TSharedPtr<FUEAgentSessionItem>>)
+					.ListItemsSource(&SessionItems)
+					.SelectionMode(ESelectionMode::None)
+					.OnGenerateRow(this, &SAgentRootPanel::OnGenerateSessionRow)
 				]
 			]
 		];
@@ -8993,25 +9218,52 @@ TSharedRef<SWidget> SAgentRootPanel::BuildDebugWorkspace()
 					]
 					+ SVerticalBox::Slot().AutoHeight()
 					[
-						SNew(SWrapBox)
-						.UseAllottedWidth(true)
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Ping Backend"))).OnClicked_Lambda([this]() { PingBackend(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh Bootstrap"))).OnClicked_Lambda([this]() { RefreshBootstrapData(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh Settings"))).OnClicked_Lambda([this]() { RefreshSystemSettings(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh Metrics"))).OnClicked_Lambda([this]() { RefreshMetrics(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh Alerts"))).OnClicked_Lambda([this]() { RefreshSystemAlerts(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh Tasks"))).OnClicked_Lambda([this]() { RefreshTaskData(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh KB"))).OnClicked_Lambda([this]() { RefreshKnowledgeBaseStatus(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Submit Inventory"))).OnClicked_Lambda([this]() { SubmitProjectInventorySnapshot(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Restore Session"))).OnClicked_Lambda([this]() { InitializeSession(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Reload Detail"))).OnClicked_Lambda([this]() { ReloadCurrentResultDetail(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh Projections"))).OnClicked_Lambda([this]() { RefreshProjectionDataForCurrentResult(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Open Trace"))).OnClicked_Lambda([this]() { OpenTraceOrCopyFallback(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Copy JSON"))).OnClicked_Lambda([this]() { CopyCurrentDebugSection(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Retry"))).OnClicked_Lambda([this]() { SubmitCurrentRequest(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Cancel Run"))).OnClicked_Lambda([this]() { CancelCurrentRun(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Clear Session"))).OnClicked_Lambda([this]() { ClearCurrentSession(); return FReply::Handled(); })]
-						+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Export Response"))).OnClicked_Lambda([this]() { ExportCurrentResponse(); return FReply::Handled(); })]
+						SNew(SVerticalBox)
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 8.0f)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 6.0f, 0.0f)
+							[
+								SNew(SButton).Text(FText::FromString(TEXT("Ping"))).OnClicked_Lambda([this]() { PingBackend(); return FReply::Handled(); })
+							]
+							+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 6.0f, 0.0f)
+							[
+								SNew(SButton).Text(FText::FromString(TEXT("Reload"))).OnClicked_Lambda([this]() { ReloadCurrentResultDetail(); return FReply::Handled(); })
+							]
+							+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 6.0f, 0.0f)
+							[
+								SNew(SButton).Text(FText::FromString(TEXT("Trace"))).OnClicked_Lambda([this]() { OpenTraceOrCopyFallback(); return FReply::Handled(); })
+							]
+							+ SHorizontalBox::Slot().AutoWidth()
+							[
+								SNew(SButton).Text(FText::FromString(TEXT("Copy JSON"))).OnClicked_Lambda([this]() { CopyCurrentDebugSection(); return FReply::Handled(); })
+							]
+						]
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SNew(SExpandableArea)
+							.AreaTitle(FText::FromString(TEXT("More debug actions")))
+							.InitiallyCollapsed(true)
+							.BodyContent()
+							[
+								SNew(SWrapBox)
+								.UseAllottedWidth(true)
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh Bootstrap"))).OnClicked_Lambda([this]() { RefreshBootstrapData(); return FReply::Handled(); })]
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh Settings"))).OnClicked_Lambda([this]() { RefreshSystemSettings(); return FReply::Handled(); })]
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh Metrics"))).OnClicked_Lambda([this]() { RefreshMetrics(); return FReply::Handled(); })]
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh Alerts"))).OnClicked_Lambda([this]() { RefreshSystemAlerts(); return FReply::Handled(); })]
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh Tasks"))).OnClicked_Lambda([this]() { RefreshTaskData(); return FReply::Handled(); })]
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh KB"))).OnClicked_Lambda([this]() { RefreshKnowledgeBaseStatus(); return FReply::Handled(); })]
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Submit Inventory"))).OnClicked_Lambda([this]() { SubmitProjectInventorySnapshot(); return FReply::Handled(); })]
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Restore Session"))).OnClicked_Lambda([this]() { InitializeSession(); return FReply::Handled(); })]
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Tool Catalog"))).OnClicked_Lambda([this]() { ShowEditorOperationCapabilities(); return FReply::Handled(); })]
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Refresh Projections"))).OnClicked_Lambda([this]() { RefreshProjectionDataForCurrentResult(); return FReply::Handled(); })]
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Retry"))).OnClicked_Lambda([this]() { SubmitCurrentRequest(); return FReply::Handled(); })]
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Cancel Run"))).OnClicked_Lambda([this]() { CancelCurrentRun(); return FReply::Handled(); })]
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Clear Session"))).OnClicked_Lambda([this]() { ClearCurrentSession(); return FReply::Handled(); })]
+								+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)[SNew(SButton).Text(FText::FromString(TEXT("Export Response"))).OnClicked_Lambda([this]() { ExportCurrentResponse(); return FReply::Handled(); })]
+							]
+						]
 					]
 				]
 			]
@@ -9086,7 +9338,7 @@ TSharedRef<SWidget> SAgentRootPanel::BuildFunctionParameterPanel()
 {
 	return SNew(SExpandableArea)
 		.AreaTitle(FText::FromString(TEXT("Function Workspace")))
-		.InitiallyCollapsed(false)
+		.InitiallyCollapsed(UEAgent::UsesUnifiedChat(StateStore->GetActiveFunction()))
 		.BodyContent()
 		[
 			SNew(SVerticalBox)
@@ -9689,115 +9941,121 @@ TSharedRef<SWidget> SAgentRootPanel::BuildFunctionSpecificForm(const EUEAgentFun
 			]
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 6.0f, 0.0f, 0.0f)
 			[
-				SNew(SWrapBox)
-				.UseAllottedWidth(true)
-				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+				SNew(SExpandableArea)
+				.AreaTitle(FText::FromString(TEXT("Project quick reads")))
+				.InitiallyCollapsed(true)
+				.BodyContent()
 				[
-					SNew(SButton)
-					.Text(FText::FromString(TEXT("Sync Inventory Now")))
-					.ToolTipText(FText::FromString(TEXT("Submit a fresh Project Inventory snapshot. The plugin also auto-syncs once when opened.")))
-					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
-					.OnClicked_Lambda([this]()
-					{
-						SubmitProjectInventorySnapshot(false);
-						return FReply::Handled();
-					})
-				]
-				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
-				[
-					SNew(SButton)
-					.Text(FText::FromString(TEXT("Show Assets")))
-					.ToolTipText(FText::FromString(TEXT("Read the latest backend Project Inventory and list project assets in chat.")))
-					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
-					.OnClicked_Lambda([this]()
-					{
-						ShowAssetInventory();
-						return FReply::Handled();
-					})
-				]
-				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
-				[
-					SNew(SButton)
-					.Text(FText::FromString(TEXT("Show Selected Asset")))
-					.ToolTipText(FText::FromString(TEXT("Read Project Inventory details for the currently selected Content Browser asset.")))
-					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
-					.OnClicked_Lambda([this]()
-					{
-						ShowSelectedAssetDetail();
-						return FReply::Handled();
-					})
-				]
-				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
-				[
-					SNew(SButton)
-					.Text(FText::FromString(TEXT("Show Blueprint Graphs")))
-					.ToolTipText(FText::FromString(TEXT("Read the latest backend Project Inventory and show Blueprint graph/node summaries in chat.")))
-					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
-					.OnClicked_Lambda([this]()
-					{
-						ShowBlueprintGraphInventory();
-						return FReply::Handled();
-					})
-				]
-				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
-				[
-					SNew(SButton)
-					.Text(FText::FromString(TEXT("Show Level Actors")))
-					.ToolTipText(FText::FromString(TEXT("Read current Project Inventory level actor summaries in chat.")))
-					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
-					.OnClicked_Lambda([this]()
-					{
-						ShowLevelActors();
-						return FReply::Handled();
-					})
-				]
-				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
-				[
-					SNew(SButton)
-					.Text(FText::FromString(TEXT("Show Materials")))
-					.ToolTipText(FText::FromString(TEXT("Read current Project Inventory Material Instance parameter summaries in chat.")))
-					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
-					.OnClicked_Lambda([this]()
-					{
-						ShowMaterialInstances();
-						return FReply::Handled();
-					})
-				]
-				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
-				[
-					SNew(SButton)
-					.Text(FText::FromString(TEXT("Show Tools")))
-					.ToolTipText(FText::FromString(TEXT("Show supported editor-operation tools, read-only inspections, groups, and confirmation policy.")))
-					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
-					.OnClicked_Lambda([this]()
-					{
-						ShowEditorOperationCapabilities();
-						return FReply::Handled();
-					})
-				]
-				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
-				[
-					SNew(SButton)
-					.Text(FText::FromString(TEXT("Show Activity")))
-					.ToolTipText(FText::FromString(TEXT("Show recent editor-operation proposals, execution states, and diagnostic counts.")))
-					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
-					.OnClicked_Lambda([this]()
-					{
-						ShowEditorOperationActivity();
-						return FReply::Handled();
-					})
-				]
-				+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
-				[
-					SNew(SButton)
-					.Text(FText::FromString(TEXT("Show Inventory Summary")))
-					.ToolTipText(FText::FromString(TEXT("Show the latest backend Project Inventory counts in chat, including assets, Blueprints, code files, level actors and Material Instances.")))
-					.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
-					.OnClicked_Lambda([this]()
-					{
-						ShowProjectInventorySummary();
-						return FReply::Handled();
-					})
+					SNew(SWrapBox)
+					.UseAllottedWidth(true)
+					+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Sync Inventory Now")))
+						.ToolTipText(FText::FromString(TEXT("Submit a fresh Project Inventory snapshot. The plugin also auto-syncs once when opened.")))
+						.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+						.OnClicked_Lambda([this]()
+						{
+							SubmitProjectInventorySnapshot(false);
+							return FReply::Handled();
+						})
+					]
+					+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Show Assets")))
+						.ToolTipText(FText::FromString(TEXT("Read the latest backend Project Inventory and list project assets in chat.")))
+						.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+						.OnClicked_Lambda([this]()
+						{
+							ShowAssetInventory();
+							return FReply::Handled();
+						})
+					]
+					+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Show Selected Asset")))
+						.ToolTipText(FText::FromString(TEXT("Read Project Inventory details for the currently selected Content Browser asset.")))
+						.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+						.OnClicked_Lambda([this]()
+						{
+							ShowSelectedAssetDetail();
+							return FReply::Handled();
+						})
+					]
+					+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Show Blueprint Graphs")))
+						.ToolTipText(FText::FromString(TEXT("Read the latest backend Project Inventory and show Blueprint graph/node summaries in chat.")))
+						.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+						.OnClicked_Lambda([this]()
+						{
+							ShowBlueprintGraphInventory();
+							return FReply::Handled();
+						})
+					]
+					+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Show Level Actors")))
+						.ToolTipText(FText::FromString(TEXT("Read current Project Inventory level actor summaries in chat.")))
+						.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+						.OnClicked_Lambda([this]()
+						{
+							ShowLevelActors();
+							return FReply::Handled();
+						})
+					]
+					+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Show Materials")))
+						.ToolTipText(FText::FromString(TEXT("Read current Project Inventory Material Instance parameter summaries in chat.")))
+						.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+						.OnClicked_Lambda([this]()
+						{
+							ShowMaterialInstances();
+							return FReply::Handled();
+						})
+					]
+					+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Show Tools")))
+						.ToolTipText(FText::FromString(TEXT("Show supported editor-operation tools, read-only inspections, groups, and confirmation policy.")))
+						.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+						.OnClicked_Lambda([this]()
+						{
+							ShowEditorOperationCapabilities();
+							return FReply::Handled();
+						})
+					]
+					+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Show Activity")))
+						.ToolTipText(FText::FromString(TEXT("Show recent editor-operation proposals, execution states, and diagnostic counts.")))
+						.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+						.OnClicked_Lambda([this]()
+						{
+							ShowEditorOperationActivity();
+							return FReply::Handled();
+						})
+					]
+					+ SWrapBox::Slot().Padding(0.0f, 0.0f, 6.0f, 6.0f)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Show Inventory Summary")))
+						.ToolTipText(FText::FromString(TEXT("Show the latest backend Project Inventory counts in chat, including assets, Blueprints, code files, level actors and Material Instances.")))
+						.IsEnabled_Lambda([this]() { return !StateStore->IsBusy(); })
+						.OnClicked_Lambda([this]()
+						{
+							ShowProjectInventorySummary();
+							return FReply::Handled();
+						})
+					]
 				]
 			];
 
@@ -10187,44 +10445,49 @@ TSharedRef<SWidget> SAgentRootPanel::BuildChatBubble(const TSharedPtr<FUEAgentCh
 {
 	const bool bUser = Message->Role == EUEAgentChatRole::User;
 	const bool bAgent = Message->Role == EUEAgentChatRole::Agent;
-	const FLinearColor BubbleColor = bUser ? FLinearColor(0.08f, 0.20f, 0.34f, 1.0f) : (bAgent ? FLinearColor(0.055f, 0.065f, 0.082f, 1.0f) : FLinearColor(0.22f, 0.14f, 0.055f, 1.0f));
-	const FLinearColor RoleColor = bUser ? UEAgentRootPanelPrivate::AgentAccentColor() : (bAgent ? FLinearColor(0.23f, 0.28f, 0.34f, 1.0f) : UEAgentRootPanelPrivate::WarningAccentColor());
-	const FString RoleLabel = bUser ? TEXT("YOU") : (bAgent ? TEXT("AGENT") : TEXT("SYSTEM"));
+	const FLinearColor BubbleColor = bUser ? FLinearColor(0.075f, 0.18f, 0.30f, 1.0f) : (bAgent ? FLinearColor(0.048f, 0.057f, 0.073f, 1.0f) : FLinearColor(0.18f, 0.12f, 0.055f, 1.0f));
+	const FLinearColor RoleColor = bUser ? UEAgentRootPanelPrivate::AgentAccentColor() : (bAgent ? FLinearColor(0.18f, 0.24f, 0.30f, 1.0f) : UEAgentRootPanelPrivate::WarningAccentColor());
+	const FString RoleLabel = bUser ? TEXT("You") : (bAgent ? TEXT("UE Agent") : TEXT("Note"));
 
-	return SNew(SBorder)
-		.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-		.BorderBackgroundColor(BubbleColor)
-		.Padding(11.0f)
+	return SNew(SBox)
+		.MaxDesiredWidth(760.0f)
 		[
-			SNew(SVerticalBox)
-			+ SVerticalBox::Slot().AutoHeight()
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+			.BorderBackgroundColor(BubbleColor)
+			.Padding(FMargin(12.0f, 10.0f))
 			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
 				[
-					UEAgentRootPanelPrivate::MakeUiPill(RoleLabel, RoleColor)
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						UEAgentRootPanelPrivate::MakeUiPill(RoleLabel, RoleColor)
+					]
+					+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(8.0f, 0.0f, 0.0f, 0.0f).VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(Message->Title))
+						.Font(FAppStyle::GetFontStyle("PropertyWindow.BoldFont"))
+						.AutoWrapText(true)
+					]
 				]
-				+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(8.0f, 0.0f, 0.0f, 0.0f).VAlign(VAlign_Center)
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 8.0f, 0.0f, 0.0f)
 				[
 					SNew(STextBlock)
-					.Text(FText::FromString(Message->Title))
-					.Font(FAppStyle::GetFontStyle("PropertyWindow.BoldFont"))
+					.Text(FText::FromString(Message->Text))
 					.AutoWrapText(true)
 				]
-			]
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 8.0f, 0.0f, 0.0f)
-			[
-				SNew(STextBlock)
-				.Text(FText::FromString(Message->Text))
-				.AutoWrapText(true)
-			]
-			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 7.0f, 0.0f, 0.0f)
-			[
-				SNew(STextBlock)
-				.Text(FText::FromString(Message->StatusHint.IsEmpty()
-					? Message->Timestamp.ToString(TEXT("%H:%M:%S"))
-					: FString::Printf(TEXT("%s  |  %s"), *Message->Timestamp.ToString(TEXT("%H:%M:%S")), *Message->StatusHint)))
-				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 7.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(Message->StatusHint.IsEmpty()
+						? Message->Timestamp.ToString(TEXT("%H:%M:%S"))
+						: FString::Printf(TEXT("%s  |  %s"), *Message->Timestamp.ToString(TEXT("%H:%M:%S")), *Message->StatusHint)))
+					.Font(FAppStyle::GetFontStyle("SmallFont"))
+					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+				]
 			]
 		];
 }
@@ -10618,6 +10881,67 @@ TSharedRef<ITableRow> SAgentRootPanel::OnGenerateChatRow(TSharedPtr<FUEAgentChat
 			+ SHorizontalBox::Slot().AutoWidth().Padding(8.0f, 6.0f)
 			[
 				bUser ? BuildChatBubble(Message) : SNew(SSpacer)
+			]
+		];
+}
+
+TSharedRef<ITableRow> SAgentRootPanel::OnGenerateSessionRow(TSharedPtr<FUEAgentSessionItem> SessionItem, const TSharedRef<STableViewBase>& OwnerTable)
+{
+	const bool bIsActive = SessionItem.IsValid() && SessionItem->SessionId == StateStore->GetSessionId();
+	const FString Title = SessionItem.IsValid() && !SessionItem->Title.IsEmpty() ? SessionItem->Title : TEXT("New Chat");
+	const FString MetaText = SessionItem.IsValid()
+		? FString::Printf(TEXT("%d msgs  |  %s"), SessionItem->MessageCount, *SessionItem->SessionId.Left(8))
+		: FString();
+
+	return SNew(STableRow<TSharedPtr<FUEAgentSessionItem>>, OwnerTable)
+		.Padding(FMargin(0.0f, 0.0f, 0.0f, 6.0f))
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+			.BorderBackgroundColor(bIsActive ? FLinearColor(0.07f, 0.15f, 0.24f, 1.0f) : FLinearColor(0.032f, 0.039f, 0.055f, 1.0f))
+			.Padding(8.0f)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(Title))
+					.Font(FAppStyle::GetFontStyle("PropertyWindow.BoldFont"))
+					.AutoWrapText(true)
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(MetaText))
+					.Font(FAppStyle::GetFontStyle("SmallFont"))
+					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 7.0f, 0.0f, 0.0f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0.0f, 0.0f, 4.0f, 0.0f)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(bIsActive ? TEXT("Current") : TEXT("Open")))
+						.IsEnabled(!bIsActive && SessionItem.IsValid() && !StateStore->IsBusy())
+						.OnClicked_Lambda([this, SessionItem]()
+						{
+							SwitchToSession(SessionItem);
+							return FReply::Handled();
+						})
+					]
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Delete")))
+						.IsEnabled(SessionItem.IsValid() && !StateStore->IsBusy())
+						.OnClicked_Lambda([this, SessionItem]()
+						{
+							ArchiveSessionItem(SessionItem);
+							return FReply::Handled();
+						})
+					]
+				]
 			]
 		];
 }
